@@ -163,14 +163,14 @@ pub struct Jam {
     #[serde(rename = "pubMillis")]
     pub pub_millis: u64,
     pub end_pub_millis: Option<u64>,
-    pub segments: Vec<JamSegments>,
+    pub segments: Vec<JamSegment>,
     pub line: Vec<JamLine>,
 }
 
 #[derive(Serialize, Deserialize, Debug, FromRow)]
 pub struct JamLine {
     #[serde(default)]
-    pub id: u32,
+    pub id: Option<u32>,
     #[serde(default)]
     pub jams_uuid: u64,
     pub position: Option<u8>,
@@ -179,9 +179,9 @@ pub struct JamLine {
 }
 
 #[derive(Serialize, Deserialize, Debug, FromRow)]
-pub struct JamSegments {
+pub struct JamSegment {
     #[serde(default)]
-    pub id: u32,
+    pub id: Option<u32>,
     #[serde(default)]
     pub jams_uuid: u64,
     pub position: Option<u8>,
@@ -312,6 +312,40 @@ impl AlertsGroup {
     }
 }
 
+impl JamLine {
+    pub fn new(id: Option<u32>, jams_uuid: u64, position: Option<u8>, x: f64, y: f64) -> Self {
+        return JamLine {
+            id,
+            jams_uuid,
+            position,
+            x,
+            y,
+        };
+    }
+}
+
+impl JamSegment {
+    pub fn new(
+        id: Option<u32>,
+        jams_uuid: u64,
+        position: Option<u8>,
+        segment_id: u32,
+        from_node: u64,
+        to_node: u64,
+        is_forward: bool,
+    ) -> Self {
+        return JamSegment {
+            id,
+            jams_uuid,
+            position,
+            segment_id,
+            from_node,
+            to_node,
+            is_forward,
+        };
+    }
+}
+
 impl JamsGroup {
     pub async fn bulk_insert(&self) -> Result<u64, sqlx::Error> {
         if self.jams.is_empty() {
@@ -344,6 +378,7 @@ impl JamsGroup {
             Vec::with_capacity(self.jams.len()),
         );
 
+        // Prepare data for insertion: jams and internal objects lines and segments
         for jam in &self.jams {
             uuids.push(jam.uuid as i64);
             levels.push(jam.level as i16);
@@ -356,16 +391,34 @@ impl JamsGroup {
             pub_millies.push(jam.pub_millis as i64);
             end_pub_millies.push(jam.end_pub_millis.map(|e| e as i64));
 
-            let lines = jam.line.iter().map(|l| (l.x, l.y)).collect::<Vec<(f64, f64)>>();
-            let segments = jam.segments.iter().map(|s| (s.segment_id, s.from_node, s.to_node, s.is_forward)).collect::<Vec<(u32, u64, u64, bool)>>();
+            let mut lines: Vec<JamLine> = vec![];
+            let mut segments: Vec<JamSegment> = vec![];
+
+            // Initialize the position index at 1 equal to the original data
+            for (i, line) in jam.line.iter().enumerate() {
+                lines.push(JamLine::new(None, jam.uuid, Some(i as u8 + 1), line.x, line.y));
+            }
+
+            // Initialize the position index at 1 equal to the original data
+            for (i, segment) in jam.segments.iter().enumerate() {
+                segments.push(JamSegment::new(
+                    None,
+                    jam.uuid,
+                    Some(i as u8 + 1),
+                    segment.segment_id,
+                    segment.from_node,
+                    segment.to_node,
+                    segment.is_forward,
+                ));
+            }
 
             sqlx::query!(
                 r#"
                 INSERT INTO jams_line(jams_uuid, x, y) SELECT * FROM UNNEST($1::bigint[], $2::real[], $3::real[])
                 "#,
                 &vec![jam.uuid as i64; lines.len()],
-                &lines.iter().map(|l| l.0 as f32).collect::<Vec<f32>>(),
-                &lines.iter().map(|l| l.1 as f32).collect::<Vec<f32>>()
+                &lines.iter().map(|l| l.x as f32).collect::<Vec<f32>>(),
+                &lines.iter().map(|l| l.y as f32).collect::<Vec<f32>>()
             ).execute(&pg_pool).await?;
 
             sqlx::query!(
@@ -373,14 +426,12 @@ impl JamsGroup {
                 INSERT INTO jams_segments(jams_uuid, ID, from_node, to_node, is_forward) SELECT * FROM UNNEST($1::bigint[], $2::int[], $3::bigint[], $4::bigint[], $5::bool[])
                 "#,
                 &vec![jam.uuid as i64; segments.len()],
-                &segments.iter().map(|s| s.0 as i32).collect::<Vec<i32>>(),
-                &segments.iter().map(|s| s.1 as i64).collect::<Vec<i64>>(),
-                &segments.iter().map(|s| s.2 as i64).collect::<Vec<i64>>(),
-                &segments.iter().map(|s| s.3).collect::<Vec<bool>>()
+                &segments.iter().map(|s| s.segment_id as i32).collect::<Vec<i32>>(),
+                &segments.iter().map(|s| s.from_node as i64).collect::<Vec<i64>>(),
+                &segments.iter().map(|s| s.to_node as i64).collect::<Vec<i64>>(),
+                &segments.iter().map(|s| s.is_forward).collect::<Vec<bool>>()
             ).execute(&pg_pool).await?;
-
         }
-
 
         let result = sqlx::query!(
         r#"
@@ -400,12 +451,10 @@ impl JamsGroup {
             &end_pub_millies as _
         ).execute(&pg_pool).await?;
 
-
         Ok(result.rows_affected())
     }
 }
 
-// I need implement this
 async fn connect_to_db() -> Result<PgPool, sqlx::Error> {
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     PgPool::connect(&database_url).await
