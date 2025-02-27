@@ -12,10 +12,11 @@ pub fn request_waze_data() -> Result<String, Box<dyn Error>> {
     Ok(response.text()?)
 }
 
-pub fn request_and_parse() -> Result<events::AlertsGroup, Box<dyn std::error::Error>> {
+pub fn request_and_parse() -> Result<(events::AlertsGroup, events::JamsGroup), Box<dyn std::error::Error>> {
     let response = request_waze_data()?;
 
     let alerts: events::AlertsGroup = serde_json::from_str(&response)?;
+    let jams: events::JamsGroup = serde_json::from_str(&response)?;
 
-    Ok(alerts)
+    Ok((alerts, jams))
 }
