@@ -66,46 +66,12 @@ pub struct Alerts {
     pub end_pub_millis: Option<u64>,
 }
 
-impl Alerts {
-    pub fn new(
-        uuid: String,
-        reliability: u8,
-        alert_type: AlertType,
-        road_type: Option<u8>,
-        magvar: u16,
-        subtype: String,
-        location: Location,
-        street: String,
-        pub_millis: u64,
-        end_pub_millis: Option<u64>,
-    ) -> Self {
-        Alerts {
-            uuid,
-            reliability,
-            alert_type,
-            road_type,
-            magvar,
-            subtype,
-            location,
-            street,
-            pub_millis,
-            end_pub_millis,
-        }
-    }
-
-    pub fn insert_to_db() {}
-}
-
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AlertsGroup {
     alerts: Vec<Alerts>,
 }
 
 impl AlertsGroup {
-    pub fn new(alerts: Vec<Alerts>) -> Self {
-        AlertsGroup { alerts }
-    }
-
     pub async fn bulk_insert(&self) -> Result<(), sqlx::Error> {
         if self.alerts.is_empty() {
             return Ok(());
@@ -120,7 +86,6 @@ impl AlertsGroup {
             mut road_types,
             mut magvars,
             mut subtypes,
-            mut location_ids,
             mut streets,
             mut pub_millis,
             mut end_pub_millis,
@@ -134,11 +99,13 @@ impl AlertsGroup {
             Vec::with_capacity(self.alerts.len()),
             Vec::with_capacity(self.alerts.len()),
             Vec::with_capacity(self.alerts.len()),
-            Vec::with_capacity(self.alerts.len()),
         );
+
+        let mut locations = Vec::with_capacity(self.alerts.len());
 
         // Single iteration over alerts
         for alert in &self.alerts {
+
             uuids.push(
                 Uuid::parse_str(&alert.uuid).map_err(|e| sqlx::Error::Protocol(e.to_string()))?,
             );
@@ -146,12 +113,23 @@ impl AlertsGroup {
             types.push(&alert.alert_type);
             road_types.push(alert.road_type.map(|rt| rt as i16));
             magvars.push(alert.magvar as f32);
+            locations.push(&alert.location);
             subtypes.push(alert.subtype.clone());
-            location_ids.push(alert.location.id as i32);
             streets.push(alert.street.clone());
             pub_millis.push(alert.pub_millis as i64);
             end_pub_millis.push(alert.end_pub_millis.map(|e| e as i64));
         }
+
+        let locations_ids = sqlx::query!(
+            r#"
+            INSERT INTO alerts_location(x, y) SELECT * FROM UNNEST($1::real[], $2::real[])
+            RETURNING id
+            "#,
+            &locations.iter().map(|l| l.x as f32).collect::<Vec<f32>>(),
+            &locations.iter().map(|l| l.y as f32).collect::<Vec<f32>>()
+        ).fetch_all(&pg_pool).await?;
+
+        let location_ids = locations_ids.iter().map(|l| l.id).collect::<Vec<i32>>();
 
         sqlx::query!(
         r#"
