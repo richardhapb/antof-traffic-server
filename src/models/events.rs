@@ -85,17 +85,17 @@ pub struct Location {
 #[derive(Serialize, Deserialize, Debug, FromRow)]
 pub struct Alert {
     pub uuid: String,
-    pub reliability: u8,
+    pub reliability: Option<u8>,
     #[serde(rename = "type")]
     #[sqlx(rename = "type")]
-    pub alert_type: AlertType,
+    pub alert_type: Option<AlertType>,
     #[serde(rename = "roadType")]
     pub road_type: Option<u8>,
-    pub magvar: u16,
-    pub subtype: String,
+    pub magvar: Option<u16>,
+    pub subtype: Option<String>,
     #[sqlx(rename = "location_id")]
-    pub location: Location,
-    pub street: String,
+    pub location: Option<Location>,
+    pub street: Option<String>,
     #[serde(rename = "pubMillis")]
     pub pub_millis: u64,
     pub end_pub_millis: Option<u64>,
@@ -150,21 +150,21 @@ pub struct AlertsGroup {
 #[derive(Serialize, Deserialize, Debug, FromRow)]
 pub struct Jam {
     pub uuid: u64,
-    pub level: u8,
+    pub level: Option<u8>,
     #[serde(rename = "speedKMH")]
-    pub speed_kmh: f32,
-    pub length: u16,
+    pub speed_kmh: Option<f32>,
+    pub length: Option<u16>,
     #[serde(rename = "endNode")]
     pub end_node: Option<String>,
     #[serde(rename = "roadType")]
     pub road_type: Option<u8>,
-    pub delay: i16,
-    pub street: String,
+    pub delay: Option<i16>,
+    pub street: Option<String>,
     #[serde(rename = "pubMillis")]
     pub pub_millis: u64,
     pub end_pub_millis: Option<u64>,
-    pub segments: Vec<JamSegment>,
-    pub line: Vec<JamLine>,
+    pub segments: Option<Vec<JamSegment>>,
+    pub line: Option<Vec<JamLine>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, FromRow)]
@@ -263,10 +263,10 @@ impl AlertsGroup {
             uuids.push(
                 Uuid::parse_str(&alert.uuid).map_err(|e| sqlx::Error::Protocol(e.to_string()))?,
             );
-            reliabilities.push(alert.reliability as i16);
-            types.push(alert.alert_type.as_str());
+            reliabilities.push(alert.reliability.map(|ar| ar as i16));
+            types.push(alert.alert_type.as_ref().map(|at| at.as_str()).unwrap_or_default());
             road_types.push(alert.road_type.map(|rt| rt as i16));
-            magvars.push(alert.magvar as f32);
+            magvars.push(alert.magvar.map(|am| am as f32));
             locations.push(&alert.location);
             subtypes.push(alert.subtype.clone());
             streets.push(alert.street.clone());
@@ -279,8 +279,14 @@ impl AlertsGroup {
             INSERT INTO alerts_location(x, y) SELECT * FROM UNNEST($1::real[], $2::real[])
             RETURNING id
             "#,
-            &locations.iter().map(|l| l.x as f32).collect::<Vec<f32>>(),
-            &locations.iter().map(|l| l.y as f32).collect::<Vec<f32>>()
+            &locations
+                .iter()
+                .filter_map(|l| l.as_ref().map(|loc| loc.x as f32))
+                .collect::<Vec<f32>>(),
+            &locations
+                .iter()
+                .filter_map(|l| l.as_ref().map(|loc| loc.x as f32))
+                .collect::<Vec<f32>>()
         )
         .fetch_all(&pg_pool)
         .await?;
@@ -295,13 +301,13 @@ impl AlertsGroup {
         ON CONFLICT (uuid) DO NOTHING
         "#,
         &uuids,
-        &reliabilities,
+        &reliabilities.iter().filter_map(|r| *r).collect::<Vec<i16>>(),
         &types as _,
         &road_types as _,
-        &magvars,
-        &subtypes,
+        &magvars.iter().filter_map(|m| *m).collect::<Vec<f32>>(),
+        &subtypes.iter().filter_map(|s| s.as_deref().map(String::from)).collect::<Vec<String>>(),
         &location_ids,
-        &streets,
+        &streets.iter().filter_map(|s| s.as_deref().map(String::from)).collect::<Vec<String>>(),
         &pub_millis,
         &end_pub_millis as _
     )
@@ -409,12 +415,12 @@ impl JamsGroup {
         // Prepare data for insertion: jams and internal objects lines and segments
         for jam in &self.jams {
             uuids.push(jam.uuid as i64);
-            levels.push(jam.level as i16);
-            speed_kmhs.push(jam.speed_kmh as f32);
-            lengths.push(jam.length as i16);
+            levels.push(jam.level.map(|l| l as i16));
+            speed_kmhs.push(jam.speed_kmh.map(|k| k as f32));
+            lengths.push(jam.length.map(|l| l as i16));
             end_nodes.push(jam.end_node.clone());
             road_types.push(jam.road_type.map(|rt| rt as i16));
-            delays.push(jam.delay as i16);
+            delays.push(jam.delay.map(|d| d as i16));
             streets.push(jam.street.clone());
             pub_millies.push(jam.pub_millis as i64);
             end_pub_millies.push(jam.end_pub_millis.map(|e| e as i64));
@@ -425,8 +431,8 @@ impl JamsGroup {
                     None,
                     jam.uuid,
                     Some(i as u8 + 1),
-                    line.x,
-                    line.y,
+                    line[0].x,
+                    line[0].y,
                 ));
             }
 
@@ -436,10 +442,10 @@ impl JamsGroup {
                     None,
                     jam.uuid,
                     Some(i as u8 + 1),
-                    segment.segment_id,
-                    segment.from_node,
-                    segment.to_node,
-                    segment.is_forward,
+                    segment[0].segment_id,
+                    segment[0].from_node,
+                    segment[0].to_node,
+                    segment[0].is_forward,
                 ));
             }
         }
@@ -451,13 +457,13 @@ impl JamsGroup {
         ON CONFLICT (uuid) DO NOTHING
         "#,
             &uuids,
-            &levels,
-            &speed_kmhs,
-            &lengths,
+            &levels.iter().filter_map(|l| *l).collect::<Vec<i16>>(),
+            &speed_kmhs.iter().filter_map(|s| *s).collect::<Vec<f32>>(),
+            &lengths.iter().filter_map(|l| *l).collect::<Vec<i16>>(),
             &end_nodes as _,
             &road_types as _,
-            &delays,
-            &streets,
+            &delays.iter().filter_map(|d| *d).collect::<Vec<i16>>(),
+            &streets.iter().filter_map(|s| s.as_deref().map(String::from)).collect::<Vec<String>>(),
             &pub_millies,
             &end_pub_millies as _
         ).execute(&pg_pool).await?;
