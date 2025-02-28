@@ -89,7 +89,7 @@ pub struct Alert {
     #[serde(rename = "type")]
     #[sqlx(rename = "type")]
     pub alert_type: AlertType,
-    #[sqlx(rename = "roadType")]
+    #[serde(rename = "roadType")]
     pub road_type: Option<u8>,
     pub magvar: u16,
     pub subtype: String,
@@ -153,9 +153,9 @@ pub struct Jam {
     pub level: u8,
     #[serde(rename = "speedKMH")]
     pub speed_kmh: f32,
-    pub length: u8,
+    pub length: u16,
     #[serde(rename = "endNode")]
-    pub end_node: String,
+    pub end_node: Option<String>,
     #[serde(rename = "roadType")]
     pub road_type: Option<u8>,
     pub delay: i16,
@@ -186,7 +186,7 @@ pub struct JamSegment {
     pub jams_uuid: u64,
     pub position: Option<u8>,
     #[serde(rename = "ID")]
-    pub segment_id: u32,
+    pub segment_id: u64,
     #[serde(rename = "fromNode")]
     pub from_node: u64,
     #[serde(rename = "toNode")]
@@ -312,6 +312,31 @@ impl AlertsGroup {
     }
 }
 
+impl Jam {
+    pub async fn fill_end_pub_millis(last_data: &JamsGroup) -> Result<u64, sqlx::Error> {
+        let mut uuids = Vec::with_capacity(last_data.jams.len());
+
+        for jam in &last_data.jams {
+            let uuid = jam.uuid as i64;
+            uuids.push(uuid);
+        }
+
+        let pool = connect_to_db().await?;
+
+        let result = sqlx::query!(
+            r#"
+        UPDATE jams SET end_pub_millis = EXTRACT(EPOCH FROM NOW() AT TIME ZONE 'UTC')
+        WHERE uuid <> ALL($1::bigint[]) AND end_pub_millis IS NULL
+    "#,
+            &uuids
+        )
+        .execute(&pool)
+        .await?;
+
+        Ok(result.rows_affected())
+    }
+}
+
 impl JamLine {
     pub fn new(id: Option<u32>, jams_uuid: u64, position: Option<u8>, x: f64, y: f64) -> Self {
         return JamLine {
@@ -329,7 +354,7 @@ impl JamSegment {
         id: Option<u32>,
         jams_uuid: u64,
         position: Option<u8>,
-        segment_id: u32,
+        segment_id: u64,
         from_node: u64,
         to_node: u64,
         is_forward: bool,
@@ -378,6 +403,9 @@ impl JamsGroup {
             Vec::with_capacity(self.jams.len()),
         );
 
+        let mut lines: Vec<JamLine> = vec![];
+        let mut segments: Vec<JamSegment> = vec![];
+
         // Prepare data for insertion: jams and internal objects lines and segments
         for jam in &self.jams {
             uuids.push(jam.uuid as i64);
@@ -391,12 +419,15 @@ impl JamsGroup {
             pub_millies.push(jam.pub_millis as i64);
             end_pub_millies.push(jam.end_pub_millis.map(|e| e as i64));
 
-            let mut lines: Vec<JamLine> = vec![];
-            let mut segments: Vec<JamSegment> = vec![];
-
             // Initialize the position index at 1 equal to the original data
             for (i, line) in jam.line.iter().enumerate() {
-                lines.push(JamLine::new(None, jam.uuid, Some(i as u8 + 1), line.x, line.y));
+                lines.push(JamLine::new(
+                    None,
+                    jam.uuid,
+                    Some(i as u8 + 1),
+                    line.x,
+                    line.y,
+                ));
             }
 
             // Initialize the position index at 1 equal to the original data
@@ -411,26 +442,6 @@ impl JamsGroup {
                     segment.is_forward,
                 ));
             }
-
-            sqlx::query!(
-                r#"
-                INSERT INTO jams_line(jams_uuid, x, y) SELECT * FROM UNNEST($1::bigint[], $2::real[], $3::real[])
-                "#,
-                &vec![jam.uuid as i64; lines.len()],
-                &lines.iter().map(|l| l.x as f32).collect::<Vec<f32>>(),
-                &lines.iter().map(|l| l.y as f32).collect::<Vec<f32>>()
-            ).execute(&pg_pool).await?;
-
-            sqlx::query!(
-                r#"
-                INSERT INTO jams_segments(jams_uuid, ID, from_node, to_node, is_forward) SELECT * FROM UNNEST($1::bigint[], $2::int[], $3::bigint[], $4::bigint[], $5::bool[])
-                "#,
-                &vec![jam.uuid as i64; segments.len()],
-                &segments.iter().map(|s| s.segment_id as i32).collect::<Vec<i32>>(),
-                &segments.iter().map(|s| s.from_node as i64).collect::<Vec<i64>>(),
-                &segments.iter().map(|s| s.to_node as i64).collect::<Vec<i64>>(),
-                &segments.iter().map(|s| s.is_forward).collect::<Vec<bool>>()
-            ).execute(&pg_pool).await?;
         }
 
         let result = sqlx::query!(
@@ -443,13 +454,37 @@ impl JamsGroup {
             &levels,
             &speed_kmhs,
             &lengths,
-            &end_nodes,
+            &end_nodes as _,
             &road_types as _,
             &delays,
             &streets,
             &pub_millies,
             &end_pub_millies as _
         ).execute(&pg_pool).await?;
+
+        sqlx::query!(
+                r#"
+                INSERT INTO jams_line(jams_uuid, position, x, y) SELECT * FROM UNNEST($1::bigint[], $2::smallint[], $3::real[], $4::real[])
+                ON CONFLICT (id) DO NOTHING
+                "#,
+                &lines.iter().map(|l| l.jams_uuid as i64).collect::<Vec<i64>>(),
+                &lines.iter().filter_map(|l| l.position.map(|p| p as i16)).collect::<Vec<i16>>(),
+                &lines.iter().map(|l| l.x as f32).collect::<Vec<f32>>(),
+                &lines.iter().map(|l| l.y as f32).collect::<Vec<f32>>()
+            ).execute(&pg_pool).await?;
+
+        sqlx::query!(
+                r#"
+                INSERT INTO jams_segments(jams_uuid, position, segment_id, from_node, to_node, is_forward) SELECT * FROM UNNEST($1::bigint[], $2::smallint[], $3::bigint[], $4::bigint[], $5::bigint[], $6::bool[])
+                ON CONFLICT (id) DO NOTHING
+                "#,
+                &segments.iter().map(|s| s.jams_uuid as i64).collect::<Vec<i64>>(),
+                &segments.iter().filter_map(|s| s.position.map(|p| p as i16)).collect::<Vec<i16>>(),
+                &segments.iter().map(|s| s.segment_id as i64).collect::<Vec<i64>>(),
+                &segments.iter().map(|s| s.from_node as i64).collect::<Vec<i64>>(),
+                &segments.iter().map(|s| s.to_node as i64).collect::<Vec<i64>>(),
+                &segments.iter().map(|s| s.is_forward).collect::<Vec<bool>>()
+            ).execute(&pg_pool).await?;
 
         Ok(result.rows_affected())
     }
