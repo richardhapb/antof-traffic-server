@@ -264,7 +264,13 @@ impl AlertsGroup {
                 Uuid::parse_str(&alert.uuid).map_err(|e| sqlx::Error::Protocol(e.to_string()))?,
             );
             reliabilities.push(alert.reliability.map(|ar| ar as i16));
-            types.push(alert.alert_type.as_ref().map(|at| at.as_str()).unwrap_or_default());
+            types.push(
+                alert
+                    .alert_type
+                    .as_ref()
+                    .map(|at| at.as_str())
+                    .unwrap_or_default(),
+            );
             road_types.push(alert.road_type.map(|rt| rt as i16));
             magvars.push(alert.magvar.map(|am| am as f32));
             locations.push(&alert.location);
@@ -426,27 +432,31 @@ impl JamsGroup {
             end_pub_millies.push(jam.end_pub_millis.map(|e| e as i64));
 
             // Initialize the position index at 1 equal to the original data
-            for (i, line) in jam.line.iter().enumerate() {
-                lines.push(JamLine::new(
-                    None,
-                    jam.uuid,
-                    Some(i as u8 + 1),
-                    line[0].x,
-                    line[0].y,
-                ));
+            if let Some(line_vec) = &jam.line {
+                for (i, line) in line_vec.iter().enumerate() {
+                    lines.push(JamLine::new(
+                        None,
+                        jam.uuid,
+                        Some(i as u8 + 1),
+                        line.x,
+                        line.y,
+                    ));
+                }
             }
 
             // Initialize the position index at 1 equal to the original data
-            for (i, segment) in jam.segments.iter().enumerate() {
-                segments.push(JamSegment::new(
-                    None,
-                    jam.uuid,
-                    Some(i as u8 + 1),
-                    segment[0].segment_id,
-                    segment[0].from_node,
-                    segment[0].to_node,
-                    segment[0].is_forward,
-                ));
+            if let Some(segments_vec) = &jam.segments {
+                for (i, segment) in segments_vec.iter().enumerate() {
+                    segments.push(JamSegment::new(
+                        None,
+                        jam.uuid,
+                        Some(i as u8 + 1),
+                        segment.segment_id,
+                        segment.from_node,
+                        segment.to_node,
+                        segment.is_forward,
+                    ));
+                }
             }
         }
 
