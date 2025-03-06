@@ -285,7 +285,7 @@ impl AlertsGroup {
                 .collect::<Vec<f32>>(),
             &locations
                 .iter()
-                .filter_map(|l| l.as_ref().map(|loc| loc.x as f32))
+                .filter_map(|l| l.as_ref().map(|loc| loc.y as f32))
                 .collect::<Vec<f32>>()
         )
         .fetch_all(&pg_pool)
