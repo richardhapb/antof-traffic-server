@@ -1,59 +1,24 @@
 extern crate dotenv;
+
 mod api;
 mod models;
+mod data;
+mod server;
 
-use crate::models::events::{Alert, Jam};
 use dotenv::dotenv;
-use tokio::runtime::Runtime;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-fn main() {
+#[tokio::main]
+async fn main() {
+    // Initialize tracing
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::new(
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
+        ))
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+
     dotenv().ok();
-
-    let rt = Runtime::new().expect("Failed to create Tokio runtime");
-
-    let (alerts, jams) = api::request_and_parse().unwrap_or_else(|err| {
-        eprint!("{}", err);
-        std::process::exit(1);
-    });
-
-    let insertions = rt.block_on(async {
-        alerts.bulk_insert().await.unwrap_or_else(|err| {
-            eprint!("{}", err);
-            std::process::exit(1);
-        })
-    });
-
-    println!("{} alerts inserted", insertions);
-
-    let insertions = rt.block_on(async {
-        jams.bulk_insert().await.unwrap_or_else(|err| {
-            eprint!("{}", err);
-            std::process::exit(1);
-        })
-    });
-
-    println!("{} jams inserted", insertions);
-
-    let updates = rt.block_on(async {
-        Alert::fill_end_pub_millis(&alerts)
-            .await
-            .unwrap_or_else(|err| {
-                eprint!("{}", err);
-                std::process::exit(1);
-            })
-    });
-
-    println!();
-    println!("{} end reports in alerts updated", updates);
-
-    let updates = rt.block_on(async {
-        Jam::fill_end_pub_millis(&jams)
-            .await
-            .unwrap_or_else(|err| {
-                eprint!("{}", err);
-                std::process::exit(1);
-            })
-    });
-
-    println!("{} end reports in jams updated", updates);
+    server::create_server().await;
 }
+
