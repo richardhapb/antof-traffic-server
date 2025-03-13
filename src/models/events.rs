@@ -2,8 +2,17 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use sqlx::types::Uuid;
 use std::env;
+use std::io::Write;
+use std::{io, string::ParseError};
 
+use memcache::{FromMemcacheValue, MemcacheError, ToMemcacheValue};
 use sqlx::PgPool;
+
+type MemcacheValue<T> = Result<T, MemcacheError>;
+
+pub enum Flags {
+    Bytes = 0,
+}
 
 // Types of events
 #[derive(Serialize, Deserialize, Debug, sqlx::Type)]
@@ -18,6 +27,37 @@ pub enum AlertType {
     RoadClosed,
 }
 
+impl<'a, W: Write> ToMemcacheValue<W> for &'a AlertType {
+    fn get_flags(&self) -> u32 {
+        Flags::Bytes as u32
+    }
+
+    fn get_length(&self) -> usize {
+        self.as_str().len()
+    }
+
+    fn write_to(&self, stream: &mut W) -> io::Result<()> {
+        stream.write_all(self.as_str().as_bytes())
+    }
+}
+
+impl FromMemcacheValue for AlertType {
+    fn from_memcache_value(value: Vec<u8>, _: u32) -> MemcacheValue<Self> {
+        let s = String::from_utf8(value)?;
+        match s.as_str() {
+            "accident" => Ok(AlertType::Accident),
+            "construction" => Ok(AlertType::Construction),
+            "hazard" => Ok(AlertType::Hazard),
+            "jam" => Ok(AlertType::Jam),
+            "misc" => Ok(AlertType::Misc),
+            "road_closed" => Ok(AlertType::RoadClosed),
+            _ => Err(MemcacheError::ParseError(std::string::FromUtf8Error::new(
+                vec![],
+            ))),
+        }
+    }
+}
+
 impl AlertType {
     pub fn as_str(&self) -> &str {
         match self {
@@ -27,6 +67,18 @@ impl AlertType {
             AlertType::Misc => "MISC",
             AlertType::Construction => "CONSTRUCTION",
             AlertType::RoadClosed => "ROAD_CLOSED",
+        }
+    }
+
+    pub fn from(string: &str) -> Result<Self, ParseError> {
+        match string {
+            "ACCIDENT" => Ok(AlertType::Accident),
+            "CONSTRUCTION" => Ok(AlertType::Construction),
+            "HAZARD" => Ok(AlertType::Hazard),
+            "JAM" => Ok(AlertType::Jam),
+            "MISC" => Ok(AlertType::Misc),
+            "ROAD_CLOSED" => Ok(AlertType::RoadClosed),
+            _ => Err(serde::de::Error::custom("Error getting Alert type from string")),
         }
     }
 }
