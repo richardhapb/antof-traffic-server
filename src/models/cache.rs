@@ -2,7 +2,7 @@ use std::io::Write;
 use std::io;
 
 use memcache::{CommandError, FromMemcacheValue, MemcacheError, ToMemcacheValue};
-use crate::models::events::{AlertType, Alert, AlertsGroup};
+use crate::models::alerts::{AlertType, Alert, AlertsGroup};
 
 type MemcacheValue<T> = Result<T, MemcacheError>;
 

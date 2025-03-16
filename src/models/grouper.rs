@@ -1,6 +1,6 @@
-use crate::models::events;
+use crate::models::alerts;
 
 // TODO: Implelement this
 pub struct GroupedAlerts {
-    alerts: Vec<events::Alert>
+    alerts: Vec<alerts::Alert>
 }

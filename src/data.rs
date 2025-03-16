@@ -1,6 +1,7 @@
 use crate::api;
 use crate::models::{
-    events::{Alert, AlertsGroup, Jam, JamsGroup},
+    alerts::{Alert, AlertsGroup},
+    jams::{Jam, JamsGroup},
     grouper::GroupedAlerts,
 };
 use sqlx::PgPool;
