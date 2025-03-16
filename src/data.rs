@@ -1,8 +1,7 @@
 use crate::api;
 use crate::models::{
     alerts::{Alert, AlertsGroup},
-    jams::{Jam, JamsGroup},
-    grouper::GroupedAlerts,
+    jams::{Jam, JamsGroup}
 };
 use sqlx::PgPool;
 use std::env;

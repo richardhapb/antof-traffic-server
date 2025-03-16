@@ -1,3 +1,4 @@
+extern crate chrono;
 extern crate dotenv;
 
 mod api;
@@ -11,6 +12,8 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
 async fn main() {
+    dotenv().ok();
+
     // Initialize tracing
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(
@@ -19,7 +22,6 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    dotenv().ok();
     server::create_server().await;
 }
 
