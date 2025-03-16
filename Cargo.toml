@@ -11,6 +11,7 @@ reqwest = { version = "0.12.12", features = ["blocking"] }
 serde = { version = "1.0.217", features = ["derive"] }
 serde_json = { version = "1.0.138" }
 sqlx = { version = "0.8.3", features = ["runtime-tokio-native-tls", "postgres", "uuid"] }
+uuid = { version = "1.16.0", features = ["v4", "serde"] }
 tokio = { version = "1.43.0", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

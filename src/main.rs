@@ -8,6 +8,7 @@ mod server;
 use dotenv::dotenv;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+
 #[tokio::main]
 async fn main() {
     // Initialize tracing

@@ -3,8 +3,11 @@ use crate::models::{
     events::{Alert, AlertsGroup, Jam, JamsGroup},
     grouper::GroupedAlerts,
 };
+use sqlx::PgPool;
+use std::env;
 
 use axum::{Json, http::StatusCode, response::IntoResponse};
+use memcache::{CommandError, MemcacheError};
 use serde_json::json;
 
 #[allow(dead_code)]
@@ -12,6 +15,14 @@ use serde_json::json;
 pub enum UpdateError {
     ApiError(Box<dyn std::error::Error>),
     DatabaseError(sqlx::Error),
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+pub enum CacheError {
+    ConnectionError(Box<dyn std::error::Error>),
+    RequestError(memcache::MemcacheError),
+    NotFound(memcache::MemcacheError),
 }
 
 impl IntoResponse for UpdateError {
@@ -28,12 +39,31 @@ impl IntoResponse for UpdateError {
     }
 }
 
+impl IntoResponse for CacheError {
+    fn into_response(self) -> axum::response::Response {
+        let (status, error_message) = match self {
+            CacheError::ConnectionError(e) => {
+                (StatusCode::BAD_GATEWAY, format!("Connection error: {}", e))
+            }
+            CacheError::RequestError(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Request error: {}", e),
+            ),
+            CacheError::NotFound(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Key not found: {}", e),
+            ),
+        };
+
+        (status, Json(json!({ "error": error_message }))).into_response()
+    }
+}
+
 /// Fetch data from the Waze API and store it in the database
 ///
 /// # Returns
 /// * Tuple containing alerts and jams retrieved from the API
 pub async fn update_data_from_api() -> Result<Json<(AlertsGroup, JamsGroup)>, UpdateError> {
-    // Use tracing instead of println for better logging
     tracing::info!("Starting update_data_from_api request");
 
     let (alerts, jams) = api::request_and_parse().await.map_err(|e| {
@@ -69,15 +99,101 @@ pub async fn update_data_from_api() -> Result<Json<(AlertsGroup, JamsGroup)>, Up
         jams_ends
     );
 
-    tracing::info!("Successfully updated data");
-
     Ok(Json((alerts, jams)))
 }
 
-// /// Get data from database or cache if it exists
-// ///
-// /// # Returns
-// /// * Grouped alerts by location
-// pub async fn get_data() -> Result<Json<GroupedAlerts>, GetDataError> {
-//     return Ok(Json(alerts));
-// }
+
+/// Retrieve data from the cache if it exists; otherwise get it from the database
+///
+pub async fn get_data() -> Result<Json<AlertsGroup>, CacheError> {
+    // Check for data in cache
+
+    tracing::info!("Connecting to memcache...");
+    let client = match memcache::connect("memcache://127.0.0.1:11211") {
+        Ok(client) => client,
+        Err(e) => {
+            tracing::error!("Failed to connect to memcache: {}", e);
+            return Err(CacheError::ConnectionError(Box::new(e)));
+        }
+    };
+
+    tracing::info!("Connected to memcache successfully!");
+    let alerts: Option<_> = match get_data_from_cache(&client).await {
+        Ok(alerts) => Some(alerts),
+        Err(e) => {
+            tracing::info!("Data not found in cache, retrieving from database...");
+            tracing::info!("{:?}", e);
+            None
+        }
+    };
+
+    let alerts = match alerts {
+        Some(alerts) => alerts,
+        None => {
+            let alerts = match get_data_from_database().await {
+                Ok(alerts) => alerts,
+                Err(e) => {
+                    tracing::error!("Error retrieving data from database.");
+                    return Err(CacheError::ConnectionError(Box::new(e)));
+                }
+            };
+            // Set in cache
+            tracing::info!("Setting data in cache");
+            if let Err(e) = client.set("alerts", &alerts, 40).map_err(|e| CacheError::ConnectionError(Box::new(e))) {
+                tracing::error!("Error setting data in cache: {:?}", e);
+            }
+
+            alerts
+        }
+    };
+
+    Ok(Json(alerts))
+}
+
+/// Retrieve data from database or cache if it exists
+///
+/// # Returns
+/// * Grouped alerts by location
+pub async fn get_data_from_cache(client: &memcache::Client) -> Result<AlertsGroup, CacheError> {
+    tracing::info!("Retrieving data...");
+    let alerts = match client.get("alerts") {
+        Ok(Some(alerts)) => alerts,
+        Ok(None) => {
+            return Err(CacheError::NotFound(MemcacheError::CommandError(
+                CommandError::InvalidArguments,
+            )));
+        }
+        Err(e) => {
+            tracing::error!("Failed to retrieve alerts from cache: {}", e);
+            return Err(CacheError::RequestError(e));
+        }
+    };
+
+    tracing::info!("Data found");
+
+    Ok(alerts)
+}
+
+pub async fn get_data_from_database() -> Result<AlertsGroup, sqlx::Error> {
+    tracing::info!("Retrieving data from database...");
+    let pool = connect_to_db().await?;
+
+    let query = "SELECT * FROM alerts";
+    let alerts: AlertsGroup = match sqlx::query_as(&query).fetch_all(&pool).await {
+        Ok(alerts) => AlertsGroup { alerts },
+        Err(e) => {
+            tracing::error!("Error retrieving data from database {}", e);
+            return Err(e);
+        }
+    };
+
+    tracing::info!("Data found");
+
+    Ok(alerts)
+}
+
+pub async fn connect_to_db() -> Result<PgPool, sqlx::Error> {
+    let database_url =
+        env::var("DATABASE_URL").expect("Environment variable DATABASE_URL must be set");
+    PgPool::connect(&database_url).await
+}

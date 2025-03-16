@@ -1,21 +1,21 @@
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
-use sqlx::types::Uuid;
-use std::env;
-use std::io::Write;
-use std::{io, string::ParseError};
+use sqlx::{FromRow, Type};
+use uuid::Uuid;
 
-use memcache::{FromMemcacheValue, MemcacheError, ToMemcacheValue};
-use sqlx::PgPool;
+use crate::data::connect_to_db;
 
-type MemcacheValue<T> = Result<T, MemcacheError>;
-
-pub enum Flags {
-    Bytes = 0,
+// Custom errors for Events
+pub enum EventError<'a> {
+    ApiRequestError,
+    DatabaseError(&'a str),
+    SerializeError(&'a str),
+    DeserializeError(&'a str),
+    RequestDataError(&'a str),
 }
 
-// Types of events
+// Types of Alerts events
 #[derive(Serialize, Deserialize, Debug, sqlx::Type)]
+#[sqlx(type_name = "varchar", rename_all = "UPPERCASE")]
 #[serde(rename_all = "UPPERCASE")]
 pub enum AlertType {
     Accident,
@@ -25,37 +25,6 @@ pub enum AlertType {
     Construction,
     #[serde(rename = "ROAD_CLOSED")]
     RoadClosed,
-}
-
-impl<'a, W: Write> ToMemcacheValue<W> for &'a AlertType {
-    fn get_flags(&self) -> u32 {
-        Flags::Bytes as u32
-    }
-
-    fn get_length(&self) -> usize {
-        self.as_str().len()
-    }
-
-    fn write_to(&self, stream: &mut W) -> io::Result<()> {
-        stream.write_all(self.as_str().as_bytes())
-    }
-}
-
-impl FromMemcacheValue for AlertType {
-    fn from_memcache_value(value: Vec<u8>, _: u32) -> MemcacheValue<Self> {
-        let s = String::from_utf8(value)?;
-        match s.as_str() {
-            "accident" => Ok(AlertType::Accident),
-            "construction" => Ok(AlertType::Construction),
-            "hazard" => Ok(AlertType::Hazard),
-            "jam" => Ok(AlertType::Jam),
-            "misc" => Ok(AlertType::Misc),
-            "road_closed" => Ok(AlertType::RoadClosed),
-            _ => Err(MemcacheError::ParseError(std::string::FromUtf8Error::new(
-                vec![],
-            ))),
-        }
-    }
 }
 
 impl AlertType {
@@ -70,7 +39,7 @@ impl AlertType {
         }
     }
 
-    pub fn from(string: &str) -> Result<Self, ParseError> {
+    pub fn from(string: &str) -> Result<Self, EventError> {
         match string {
             "ACCIDENT" => Ok(AlertType::Accident),
             "CONSTRUCTION" => Ok(AlertType::Construction),
@@ -78,16 +47,17 @@ impl AlertType {
             "JAM" => Ok(AlertType::Jam),
             "MISC" => Ok(AlertType::Misc),
             "ROAD_CLOSED" => Ok(AlertType::RoadClosed),
-            _ => Err(serde::de::Error::custom("Error getting Alert type from string")),
+            _ => Err(EventError::DeserializeError("Invalid Alert type")),
         }
     }
 }
 
 // Location (API response containing an object in this element)
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, FromRow, Type)]
+#[sqlx(type_name = "int")]
 pub struct Location {
     #[serde(default)]
-    id: u32,
+    id: i32,
     x: f64,
     y: f64,
 }
@@ -136,26 +106,31 @@ pub struct Location {
 // Main alerts structure
 #[derive(Serialize, Deserialize, Debug, FromRow)]
 pub struct Alert {
-    pub uuid: String,
-    pub reliability: Option<u8>,
+    pub uuid: Uuid,
+    pub reliability: Option<i16>,
     #[serde(rename = "type")]
-    #[sqlx(rename = "type")]
+    #[sqlx(skip)]
     pub alert_type: Option<AlertType>,
+    #[sqlx(rename = "type")]
+    #[serde(skip)]
+    pub alert_type_string: Option<String>,
     #[serde(rename = "roadType")]
-    pub road_type: Option<u8>,
-    pub magvar: Option<u16>,
+    pub road_type: Option<i16>,
+    pub magvar: Option<f32>,
     pub subtype: Option<String>,
-    #[sqlx(rename = "location_id")]
+    #[serde(skip)]
+    pub location_id: Option<i32>,
+    #[sqlx(skip)]
     pub location: Option<Location>,
     pub street: Option<String>,
     #[serde(rename = "pubMillis")]
-    pub pub_millis: u64,
-    pub end_pub_millis: Option<u64>,
+    pub pub_millis: i64,
+    pub end_pub_millis: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AlertsGroup {
-    alerts: Vec<Alert>,
+    pub alerts: Vec<Alert>,
 }
 
 /// ## Element     |      Value     |     Description
@@ -201,20 +176,20 @@ pub struct AlertsGroup {
 
 #[derive(Serialize, Deserialize, Debug, FromRow)]
 pub struct Jam {
-    pub uuid: u64,
-    pub level: Option<u8>,
+    pub uuid: i64,
+    pub level: Option<i8>,
     #[serde(rename = "speedKMH")]
     pub speed_kmh: Option<f32>,
-    pub length: Option<u16>,
+    pub length: Option<i16>,
     #[serde(rename = "endNode")]
     pub end_node: Option<String>,
     #[serde(rename = "roadType")]
-    pub road_type: Option<u8>,
+    pub road_type: Option<i8>,
     pub delay: Option<i16>,
     pub street: Option<String>,
     #[serde(rename = "pubMillis")]
-    pub pub_millis: u64,
-    pub end_pub_millis: Option<u64>,
+    pub pub_millis: i64,
+    pub end_pub_millis: Option<i64>,
     pub segments: Option<Vec<JamSegment>>,
     pub line: Option<Vec<JamLine>>,
 }
@@ -222,10 +197,10 @@ pub struct Jam {
 #[derive(Serialize, Deserialize, Debug, FromRow)]
 pub struct JamLine {
     #[serde(default)]
-    pub id: Option<u32>,
+    pub id: Option<i32>,
     #[serde(default)]
-    pub jams_uuid: u64,
-    pub position: Option<u8>,
+    pub jams_uuid: i64,
+    pub position: Option<i8>,
     pub x: f64,
     pub y: f64,
 }
@@ -233,16 +208,16 @@ pub struct JamLine {
 #[derive(Serialize, Deserialize, Debug, FromRow)]
 pub struct JamSegment {
     #[serde(default)]
-    pub id: Option<u32>,
+    pub id: Option<i64>,
     #[serde(default)]
-    pub jams_uuid: u64,
-    pub position: Option<u8>,
+    pub jams_uuid: i64,
+    pub position: Option<i8>,
     #[serde(rename = "ID")]
-    pub segment_id: u64,
+    pub segment_id: i64,
     #[serde(rename = "fromNode")]
-    pub from_node: u64,
+    pub from_node: i64,
     #[serde(rename = "toNode")]
-    pub to_node: u64,
+    pub to_node: i64,
     #[serde(rename = "isForward")]
     pub is_forward: bool,
 }
@@ -257,9 +232,7 @@ impl Alert {
         let mut uuids = Vec::with_capacity(last_data.alerts.len());
 
         for alert in &last_data.alerts {
-            let uuid =
-                Uuid::parse_str(&alert.uuid).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
-            uuids.push(uuid);
+            uuids.push(alert.uuid);
         }
 
         let pool = connect_to_db().await?;
@@ -312,9 +285,7 @@ impl AlertsGroup {
 
         // Single iteration over alerts
         for alert in &self.alerts {
-            uuids.push(
-                Uuid::parse_str(&alert.uuid).map_err(|e| sqlx::Error::Protocol(e.to_string()))?,
-            );
+            uuids.push(alert.uuid);
             reliabilities.push(alert.reliability.map(|ar| ar as i16));
             types.push(
                 alert
@@ -402,7 +373,7 @@ impl Jam {
 }
 
 impl JamLine {
-    pub fn new(id: Option<u32>, jams_uuid: u64, position: Option<u8>, x: f64, y: f64) -> Self {
+    pub fn new(id: Option<i32>, jams_uuid: i64, position: Option<i8>, x: f64, y: f64) -> Self {
         return JamLine {
             id,
             jams_uuid,
@@ -415,12 +386,12 @@ impl JamLine {
 
 impl JamSegment {
     pub fn new(
-        id: Option<u32>,
-        jams_uuid: u64,
-        position: Option<u8>,
-        segment_id: u64,
-        from_node: u64,
-        to_node: u64,
+        id: Option<i64>,
+        jams_uuid: i64,
+        position: Option<i8>,
+        segment_id: i64,
+        from_node: i64,
+        to_node: i64,
         is_forward: bool,
     ) -> Self {
         return JamSegment {
@@ -489,7 +460,7 @@ impl JamsGroup {
                     lines.push(JamLine::new(
                         None,
                         jam.uuid,
-                        Some(i as u8 + 1),
+                        Some(i as i8 + 1),
                         line.x,
                         line.y,
                     ));
@@ -502,7 +473,7 @@ impl JamsGroup {
                     segments.push(JamSegment::new(
                         None,
                         jam.uuid,
-                        Some(i as u8 + 1),
+                        Some(i as i8 + 1),
                         segment.segment_id,
                         segment.from_node,
                         segment.to_node,
@@ -556,9 +527,4 @@ impl JamsGroup {
 
         Ok(result.rows_affected())
     }
-}
-
-async fn connect_to_db() -> Result<PgPool, sqlx::Error> {
-    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    PgPool::connect(&database_url).await
 }
