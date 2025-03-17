@@ -1,6 +1,6 @@
 use axum::{
     routing::get,
-    Router
+    Router,
 };
 
 use crate::data;

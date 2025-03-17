@@ -1,10 +1,13 @@
-use std::io::Write;
+/// # Memcache traits implementation
+/// Implement all the necessary cache serialization and deserialization
+
 use std::io;
+use std::io::Write;
 
+use crate::models::alerts::{Alert, AlertType, AlertsDataGroup, AlertsGroup, AlertsGrouper};
 use memcache::{CommandError, FromMemcacheValue, MemcacheError, ToMemcacheValue};
-use crate::models::alerts::{AlertType, Alert, AlertsGroup};
 
-type MemcacheValue<T> = Result<T, MemcacheError>;
+pub type MemcacheValue<T> = Result<T, MemcacheError>;
 
 pub enum Flags {
     Bytes = 0,
@@ -36,7 +39,7 @@ impl FromMemcacheValue for AlertType {
             "jam" => Ok(AlertType::Jam),
             "misc" => Ok(AlertType::Misc),
             "road_closed" => Ok(AlertType::RoadClosed),
-            _ => Err(MemcacheError::CommandError(CommandError::InvalidArguments))
+            _ => Err(MemcacheError::CommandError(CommandError::InvalidArguments)),
         }
     }
 }
@@ -58,21 +61,20 @@ impl<'a, W: Write> ToMemcacheValue<W> for &'a Alert {
 
 impl FromMemcacheValue for Alert {
     fn from_memcache_value(value: Vec<u8>, _: u32) -> MemcacheValue<Self> {
-        serde_json::from_slice(&value).map_err(|_| MemcacheError::CommandError(CommandError::InvalidArguments))
+        serde_json::from_slice(&value)
+            .map_err(|_| MemcacheError::CommandError(CommandError::InvalidArguments))
     }
 }
 
 // AlertsGroup implementation
 
-impl <'a, W: Write> ToMemcacheValue<W> for &'a AlertsGroup {
-
+impl<'a, W: Write> ToMemcacheValue<W> for &'a AlertsGroup {
     fn get_flags(&self) -> u32 {
         Flags::Bytes as u32
     }
 
     fn get_length(&self) -> usize {
-        serde_json::to_vec(self)
-            .map_or(0, |v| v.len())
+        serde_json::to_vec(self).map_or(0, |v| v.len())
     }
 
     fn write_to(&self, stream: &mut W) -> io::Result<()> {
@@ -88,3 +90,50 @@ impl FromMemcacheValue for AlertsGroup {
     }
 }
 
+// AlertsDataGroup implementation
+
+impl<'a, W: Write> ToMemcacheValue<W> for &'a AlertsDataGroup {
+    fn get_flags(&self) -> u32 {
+        Flags::Bytes as u32
+    }
+
+    fn get_length(&self) -> usize {
+        serde_json::to_vec(self).map_or(0, |v| v.len())
+    }
+
+    fn write_to(&self, stream: &mut W) -> io::Result<()> {
+        let json = serde_json::to_vec(self)?;
+        stream.write_all(&json)
+    }
+}
+
+impl FromMemcacheValue for AlertsDataGroup {
+    fn from_memcache_value(value: Vec<u8>, _: u32) -> MemcacheValue<Self> {
+        serde_json::from_slice(&value)
+            .map_err(|_| MemcacheError::CommandError(CommandError::InvalidArguments))
+    }
+}
+
+// AlertsGrouper implementation
+
+impl FromMemcacheValue for AlertsGrouper {
+    fn from_memcache_value(value: Vec<u8>, _: u32) -> MemcacheValue<Self> {
+        serde_json::from_slice(&value)
+            .map_err(|_| MemcacheError::CommandError(CommandError::InvalidArguments))
+    }
+}
+
+impl<'a, W: Write> ToMemcacheValue<W> for &'a AlertsGrouper {
+    fn get_flags(&self) -> u32 {
+        Flags::Bytes as u32
+    }
+
+    fn get_length(&self) -> usize {
+        serde_json::to_vec(self).map_or(0, |v| v.len())
+    }
+
+    fn write_to(&self, stream: &mut W) -> io::Result<()> {
+        let json = serde_json::to_vec(self)?;
+        stream.write_all(&json)
+    }
+}

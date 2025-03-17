@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize, ser::StdError};
 use serde_json::json;
 use sqlx::{FromRow, Row, Type, postgres::PgRow};
-use std::{env, error::Error, fs, path::Path};
+use std::{collections::HashSet, env, error::Error, fs, hash::Hash, path::Path};
 use uuid::Uuid;
 
 use memcache::Client;
@@ -11,9 +11,8 @@ use ndarray::{Array1, Array2};
 use chrono::{DateTime, Datelike, Local, TimeZone, Timelike, Utc};
 use chrono_tz::America::Santiago;
 
-use crate::models::errors::EventError;
-
 use crate::data::connect_to_db;
+use crate::models::errors::EventError;
 
 type FutureError = Box<dyn StdError + Send + Sync + 'static>;
 
@@ -125,71 +124,8 @@ pub struct Alert {
     pub end_pub_millis: Option<i64>,
 }
 
-impl<'r> FromRow<'r, PgRow> for Alert {
-    fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
-        // Retrieve the alert columns
-        let alert = Alert {
-            uuid: row.try_get("uuid")?,
-            reliability: row.try_get("reliability")?,
-            // Populate both fields from the same column if needed
-            alert_type: {
-                let s: Option<String> = row.try_get("type")?;
-                s.as_ref().and_then(|t| AlertType::from(t).ok())
-            },
-            road_type: row.try_get("road_type")?,
-            magvar: row.try_get("magvar")?,
-            subtype: row.try_get("subtype")?,
-            // Manually build the location field
-            location: {
-                // Check if the location_id is present; if not, leave None
-                let location_id: Option<i32> = row.try_get("location_id")?;
-                if let Some(id) = location_id {
-                    let x: f32 = row.try_get("x")?;
-                    let y: f32 = row.try_get("y")?;
-                    Some(Location { id, x, y })
-                } else {
-                    None
-                }
-            },
-            street: row.try_get("street")?,
-            pub_millis: row.try_get("pub_millis")?,
-            end_pub_millis: row.try_get("end_pub_millis")?,
-        };
-        Ok(alert)
-    }
-}
-
-#[derive(Debug)]
-pub struct AlertsGrouper {
-    grid: (Array2<f32>, Array2<f32>),
-    x_len: usize,
-    y_len: usize,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct AlertData {
-    pub alert: Alert,
-
-    // Calculated data
-    pub group: Option<usize>, // Segment of the city
-    pub day_type: Option<char>,
-    pub week_day: Option<usize>,
-    pub day: Option<usize>,
-    pub hour: Option<usize>,
-    pub minute: Option<usize>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct AlertsGroup {
-    pub alerts: Vec<Alert>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct AlertsDataGroup {
-    pub alerts: Vec<AlertData>,
-}
-
 impl Alert {
+    /// Fill end pub millis field in database with current time
     pub async fn fill_end_pub_millis(last_data: &AlertsGroup) -> Result<u64, sqlx::Error> {
         let mut uuids = Vec::with_capacity(last_data.alerts.len());
 
@@ -309,11 +245,110 @@ impl AlertsGroup {
     }
 }
 
+// sqlx matching with database
+impl<'r> FromRow<'r, PgRow> for Alert {
+    fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
+        // Retrieve the alert columns
+        let alert = Alert {
+            uuid: row.try_get("uuid")?,
+            reliability: row.try_get("reliability")?,
+            // Populate both fields from the same column if needed
+            alert_type: {
+                let s: Option<String> = row.try_get("type")?;
+                s.as_ref().and_then(|t| AlertType::from(t).ok())
+            },
+            road_type: row.try_get("road_type")?,
+            magvar: row.try_get("magvar")?,
+            subtype: row.try_get("subtype")?,
+            // Manually build the location field
+            location: {
+                // Check if the location_id is present; if not, leave None
+                let location_id: Option<i32> = row.try_get("location_id")?;
+                if let Some(id) = location_id {
+                    let x: f32 = row.try_get("x")?;
+                    let y: f32 = row.try_get("y")?;
+                    Some(Location { id, x, y })
+                } else {
+                    None
+                }
+            },
+            street: row.try_get("street")?,
+            pub_millis: row.try_get("pub_millis")?,
+            end_pub_millis: row.try_get("end_pub_millis")?,
+        };
+        Ok(alert)
+    }
+}
+
+// Alerts vector
+#[derive(Serialize, Deserialize, Debug)]
+pub struct AlertsGroup {
+    pub alerts: Vec<Alert>,
+}
+
+// Make groups for alerts, by segment according location
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AlertsGrouper {
+    grid: (Array2<f32>, Array2<f32>),
+    x_len: usize,
+    y_len: usize,
+}
+
+// Extended Alert with aggregate data
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AlertData {
+    pub alert: Alert,
+
+    // Calculated data
+    pub group: Option<usize>, // Segment of the city
+    pub day_type: Option<char>,
+    pub week_day: Option<usize>,
+    pub day: Option<usize>,
+    pub hour: Option<usize>,
+    pub minute: Option<usize>,
+}
+
+// For filter by unique UUID
+
+impl Hash for AlertData {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.alert.uuid.hash(state); // Hash only the UUID
+        self.alert.pub_millis.hash(state); // And timestamp
+    }
+}
+
+impl PartialEq for AlertData {
+    fn eq(&self, other: &Self) -> bool {
+        self.alert.uuid == other.alert.uuid && self.alert.pub_millis == other.alert.pub_millis
+    }
+}
+
+impl Eq for AlertData {}
+
+// Extended Alerts vector
+#[derive(Serialize, Deserialize, Debug, Hash, PartialEq)]
+pub struct AlertsDataGroup {
+    pub alerts: Vec<AlertData>,
+}
+
+/// Concatenate two structs by unique uuid
+impl AlertsDataGroup {
+    pub fn concat(self, another: Self) -> Self {
+        let unique_alerts: HashSet<_> = self.alerts.into_iter().chain(another.alerts).collect();
+
+        Self {
+            alerts: unique_alerts.into_iter().collect(),
+        }
+    }
+}
+
+/// Storage the holiday data
 #[derive(Debug, Serialize, Deserialize)]
 struct Holiday {
     date: String,
 }
 
+/// Grouped holidays, handle response from API
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Holidays {
     status: String,
@@ -321,6 +356,7 @@ pub struct Holidays {
 }
 
 impl Holidays {
+    /// Verify if the holiday is present
     pub fn contains(&self, string: &str) -> bool {
         for holiday in self.data.iter() {
             if holiday.date == string {
@@ -357,7 +393,6 @@ impl AlertData {
         let day = Some(day.unwrap_or(cl_time.day() as usize));
         let week_day = Some(week_day.unwrap_or(cl_time.weekday().num_days_from_monday() as usize));
 
-
         // Determine if it is weekend or holiday
         let day_type = Some(day_type.unwrap_or_else(|| {
             if cl_time.weekday().num_days_from_monday() >= 5
@@ -382,6 +417,7 @@ impl AlertData {
 }
 
 impl AlertsGrouper {
+    /// Make the initial grid element
     pub fn new(grid_dim: (usize, usize)) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let mut new_grouper = Self {
             grid: (Array2::zeros((1, 1)), Array2::zeros((1, 1))),
@@ -394,10 +430,11 @@ impl AlertsGrouper {
         Ok(new_grouper)
     }
 
+    /// Fill group field with segment and generate aggregate data for each alert
     pub async fn group(
         &self,
         alerts: AlertsGroup,
-        memclient: &memcache::Client
+        memclient: &memcache::Client,
     ) -> Result<AlertsDataGroup, Box<dyn std::error::Error + Send + Sync>> {
         let mut alerts_data: AlertsDataGroup = AlertsDataGroup { alerts: vec![] };
 
@@ -424,7 +461,10 @@ impl AlertsGrouper {
                 &holidays,
                 Some(match self.get_quadrant_indexes((x, y)) {
                     Ok((x, y)) => self.calc_quadrant(x, y),
-                    Err(e) => {tracing::error!("Error getting group: {}", e);  0}
+                    Err(e) => {
+                        tracing::error!("Error getting group: {}", e);
+                        0
+                    }
                 }),
                 None,
                 None,
@@ -440,6 +480,7 @@ impl AlertsGrouper {
         Ok(alerts_data)
     }
 
+    /// Get the indexes of a location based in `x` and `y` coordinates
     pub fn get_quadrant_indexes(
         &self,
         point: (f32, f32),
@@ -469,15 +510,18 @@ impl AlertsGrouper {
         }
     }
 
+    /// Get quadrant number from indexes `x` and `y`
     pub fn calc_quadrant(&self, x_pos: usize, y_pos: usize) -> usize {
         self.y_len * x_pos + y_pos + 1
     }
 
+    /// Create the grid of the segments in the map
     fn get_grid(
         &mut self,
         xdiv: usize,
         ydiv: usize,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Antofagasta coodinates bounds
         let xmin = -70.43627;
         let xmax = -70.36259;
         let ymin = -23.724215;
@@ -494,6 +538,7 @@ impl AlertsGrouper {
     }
 }
 
+/// Create the `meshgrid` based on arrays
 fn meshgrid(
     x: &Array1<f32>,
     y: &Array1<f32>,

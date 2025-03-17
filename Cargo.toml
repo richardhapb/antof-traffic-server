@@ -10,7 +10,7 @@ chrono = "0.4.11"
 chrono-tz = "0.10.1"
 dotenv = "0.15.0"
 memcache = "0.18.0"
-ndarray = "0.16.1"
+ndarray = { version = "0.16.1", features = ["std", "serde"] }
 reqwest = { version = "0.12.12", features = ["blocking", "json"] }
 serde = { version = "1.0.217", features = ["derive"] }
 serde_json = { version = "1.0.138" }
