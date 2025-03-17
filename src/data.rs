@@ -1,7 +1,8 @@
 use crate::api;
+use crate::models::alerts::AlertsGrouper;
 use crate::models::{
-    alerts::{Alert, AlertsGroup},
-    jams::{Jam, JamsGroup}
+    alerts::{Alert, AlertsDataGroup, AlertsGroup},
+    jams::{Jam, JamsGroup},
 };
 use sqlx::PgPool;
 use std::env;
@@ -23,6 +24,7 @@ pub enum CacheError {
     ConnectionError(Box<dyn std::error::Error>),
     RequestError(memcache::MemcacheError),
     NotFound(memcache::MemcacheError),
+    GroupingError(Box<dyn std::error::Error>),
 }
 
 impl IntoResponse for UpdateError {
@@ -52,6 +54,10 @@ impl IntoResponse for CacheError {
             CacheError::NotFound(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Key not found: {}", e),
+            ),
+            CacheError::GroupingError(e) => (
+                StatusCode::BAD_GATEWAY,
+                format!("Error grouping data: {}", e),
             ),
         };
 
@@ -102,10 +108,10 @@ pub async fn update_data_from_api() -> Result<Json<(AlertsGroup, JamsGroup)>, Up
     Ok(Json((alerts, jams)))
 }
 
-
 /// Retrieve data from the cache if it exists; otherwise get it from the database
 ///
-pub async fn get_data() -> Result<Json<AlertsGroup>, CacheError> {
+#[axum::debug_handler]
+pub async fn get_data() -> Result<Json<AlertsDataGroup>, CacheError> {
     // Check for data in cache
 
     tracing::info!("Connecting to memcache...");
@@ -139,13 +145,22 @@ pub async fn get_data() -> Result<Json<AlertsGroup>, CacheError> {
             };
             // Set in cache
             tracing::info!("Setting data in cache");
-            if let Err(e) = client.set("alerts", &alerts, 40).map_err(|e| CacheError::ConnectionError(Box::new(e))) {
+            if let Err(e) = client
+                .set("alerts", &alerts, 40)
+                .map_err(|e| CacheError::ConnectionError(Box::new(e)))
+            {
                 tracing::error!("Error setting data in cache: {:?}", e);
             }
 
             alerts
         }
     };
+
+    let alerts_grouper = AlertsGrouper::new((10, 20)).map_err(|e| CacheError::GroupingError(e))?;
+    let alerts: AlertsDataGroup = alerts_grouper
+        .group(alerts, &client)
+        .await
+        .map_err(|e| CacheError::GroupingError(e))?;
 
     Ok(Json(alerts))
 }
@@ -178,7 +193,12 @@ pub async fn get_data_from_database() -> Result<AlertsGroup, sqlx::Error> {
     tracing::info!("Retrieving data from database...");
     let pool = connect_to_db().await?;
 
-    let query = "SELECT * FROM alerts";
+    let query = r#"
+    SELECT a.*, l.x, l.y
+    FROM alerts a
+    LEFT JOIN alerts_location l ON a.location_id = l.id
+    "#;
+
     let alerts: AlertsGroup = match sqlx::query_as(&query).fetch_all(&pool).await {
         Ok(alerts) => AlertsGroup { alerts },
         Err(e) => {

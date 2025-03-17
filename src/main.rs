@@ -2,13 +2,12 @@ extern crate chrono;
 extern crate dotenv;
 
 mod api;
-mod models;
 mod data;
+mod models;
 mod server;
 
 use dotenv::dotenv;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
 
 #[tokio::main]
 async fn main() {
@@ -22,6 +21,7 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    server::create_server().await;
+    server::create_server().await.unwrap_or_else(|e| {
+        tracing::error!("Error in server: {}", e);
+    });
 }
-

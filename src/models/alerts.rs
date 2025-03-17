@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize, ser::StdError};
-use serde_json::{Value, json};
-use sqlx::{FromRow, Type};
+use serde_json::json;
+use sqlx::{FromRow, Row, Type, postgres::PgRow};
 use std::{env, error::Error, fs, path::Path};
 use uuid::Uuid;
 
@@ -60,10 +60,10 @@ impl AlertType {
 #[derive(Serialize, Deserialize, Debug, FromRow, Type)]
 #[sqlx(type_name = "int")]
 pub struct Location {
-    #[serde(default)]
+    #[serde(skip)]
     id: i32,
-    x: f64,
-    y: f64,
+    x: f32,
+    y: f32,
 }
 
 /// # API RESPONSE
@@ -108,23 +108,16 @@ pub struct Location {
 ///   21       Service road
 
 // Main alerts structure
-#[derive(Serialize, Deserialize, Debug, FromRow)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Alert {
     pub uuid: Uuid,
     pub reliability: Option<i16>,
     #[serde(rename = "type")]
-    #[sqlx(skip)]
     pub alert_type: Option<AlertType>,
-    #[sqlx(rename = "type")]
-    #[serde(skip)]
-    pub alert_type_string: Option<String>,
     #[serde(rename = "roadType")]
     pub road_type: Option<i16>,
     pub magvar: Option<f32>,
     pub subtype: Option<String>,
-    #[serde(skip)]
-    pub location_id: Option<i32>,
-    #[sqlx(skip)]
     pub location: Option<Location>,
     pub street: Option<String>,
     #[serde(rename = "pubMillis")]
@@ -132,9 +125,43 @@ pub struct Alert {
     pub end_pub_millis: Option<i64>,
 }
 
+impl<'r> FromRow<'r, PgRow> for Alert {
+    fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
+        // Retrieve the alert columns
+        let alert = Alert {
+            uuid: row.try_get("uuid")?,
+            reliability: row.try_get("reliability")?,
+            // Populate both fields from the same column if needed
+            alert_type: {
+                let s: Option<String> = row.try_get("type")?;
+                s.as_ref().and_then(|t| AlertType::from(t).ok())
+            },
+            road_type: row.try_get("road_type")?,
+            magvar: row.try_get("magvar")?,
+            subtype: row.try_get("subtype")?,
+            // Manually build the location field
+            location: {
+                // Check if the location_id is present; if not, leave None
+                let location_id: Option<i32> = row.try_get("location_id")?;
+                if let Some(id) = location_id {
+                    let x: f32 = row.try_get("x")?;
+                    let y: f32 = row.try_get("y")?;
+                    Some(Location { id, x, y })
+                } else {
+                    None
+                }
+            },
+            street: row.try_get("street")?,
+            pub_millis: row.try_get("pub_millis")?,
+            end_pub_millis: row.try_get("end_pub_millis")?,
+        };
+        Ok(alert)
+    }
+}
+
 #[derive(Debug)]
-pub struct AlertGrouper {
-    grid: (Array2<f64>, Array2<f64>),
+pub struct AlertsGrouper {
+    grid: (Array2<f32>, Array2<f32>),
     x_len: usize,
     y_len: usize,
 }
@@ -282,9 +309,32 @@ impl AlertsGroup {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct Holiday {
+    date: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Holidays {
+    status: String,
+    data: Vec<Holiday>,
+}
+
+impl Holidays {
+    pub fn contains(&self, string: &str) -> bool {
+        for holiday in self.data.iter() {
+            if holiday.date == string {
+                return true;
+            }
+        }
+        false
+    }
+}
+
 impl AlertData {
-    pub fn new(
+    pub async fn new(
         alert: Alert,
+        holidays: &Holidays,
         group: Option<usize>,
         day: Option<usize>,
         week_day: Option<usize>,
@@ -307,9 +357,12 @@ impl AlertData {
         let day = Some(day.unwrap_or(cl_time.day() as usize));
         let week_day = Some(week_day.unwrap_or(cl_time.weekday().num_days_from_monday() as usize));
 
-        // Determine if weekend or holiday
+
+        // Determine if it is weekend or holiday
         let day_type = Some(day_type.unwrap_or_else(|| {
-            if cl_time.weekday().num_days_from_monday() >= 5 {
+            if cl_time.weekday().num_days_from_monday() >= 5
+                || holidays.contains(&cl_time.format("%Y-%m-%d").to_string())
+            {
                 'f' // Weekend
             } else {
                 's' // Regular day
@@ -328,15 +381,30 @@ impl AlertData {
     }
 }
 
-impl AlertGrouper {
-    pub fn group(
-        &mut self,
+impl AlertsGrouper {
+    pub fn new(grid_dim: (usize, usize)) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let mut new_grouper = Self {
+            grid: (Array2::zeros((1, 1)), Array2::zeros((1, 1))),
+            x_len: 1,
+            y_len: 1,
+        };
+
+        new_grouper.get_grid(grid_dim.0, grid_dim.1)?;
+
+        Ok(new_grouper)
+    }
+
+    pub async fn group(
+        &self,
         alerts: AlertsGroup,
-        grid_dim: (usize, usize),
-    ) -> Result<AlertsDataGroup, Box<dyn Error>> {
+        memclient: &memcache::Client
+    ) -> Result<AlertsDataGroup, Box<dyn std::error::Error + Send + Sync>> {
         let mut alerts_data: AlertsDataGroup = AlertsDataGroup { alerts: vec![] };
 
-        self.get_grid(grid_dim.0, grid_dim.1);
+        let holidays = get_holidays(Some(&memclient)).await.unwrap_or(Holidays {
+            status: "Error".to_string(),
+            data: vec![],
+        });
 
         for alert in alerts.alerts.into_iter() {
             let location = if let Some(location) = &alert.location {
@@ -348,21 +416,23 @@ impl AlertGrouper {
                 )));
             };
 
-            let x = location.x;
-            let y = location.y;
+            let x: f32 = location.x;
+            let y: f32 = location.y;
 
             let alert_data = AlertData::new(
                 alert, // Take ownership
+                &holidays,
                 Some(match self.get_quadrant_indexes((x, y)) {
                     Ok((x, y)) => self.calc_quadrant(x, y),
-                    Err(_) => 0, // Or handle the error appropriately
+                    Err(e) => {tracing::error!("Error getting group: {}", e);  0}
                 }),
                 None,
                 None,
                 None,
                 None,
                 None,
-            );
+            )
+            .await;
 
             alerts_data.alerts.push(alert_data);
         }
@@ -372,8 +442,8 @@ impl AlertGrouper {
 
     pub fn get_quadrant_indexes(
         &self,
-        point: (f64, f64),
-    ) -> Result<(usize, usize), Box<dyn Error>> {
+        point: (f32, f32),
+    ) -> Result<(usize, usize), Box<dyn std::error::Error + Send + Sync>> {
         let mut x_pos: Option<usize> = None;
         let mut y_pos: Option<usize> = None;
 
@@ -403,11 +473,15 @@ impl AlertGrouper {
         self.y_len * x_pos + y_pos + 1
     }
 
-    fn get_grid(&mut self, xdiv: usize, ydiv: usize) -> Result<(), Box<dyn Error>> {
-        let xmin = -7840929.70977753;
-        let xmax = -7832727.689695883;
-        let ymin = -2719838.3349531214;
-        let ymax = -2690876.189690313;
+    fn get_grid(
+        &mut self,
+        xdiv: usize,
+        ydiv: usize,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let xmin = -70.43627;
+        let xmax = -70.36259;
+        let ymin = -23.724215;
+        let ymax = -23.485813;
 
         let bounds_x = Array1::linspace(xmin, xmax, xdiv);
         let bounds_y = Array1::linspace(ymin, ymax, ydiv);
@@ -421,9 +495,9 @@ impl AlertGrouper {
 }
 
 fn meshgrid(
-    x: &Array1<f64>,
-    y: &Array1<f64>,
-) -> Result<(Array2<f64>, Array2<f64>), Box<dyn Error>> {
+    x: &Array1<f32>,
+    y: &Array1<f32>,
+) -> Result<(Array2<f32>, Array2<f32>), Box<dyn std::error::Error + Send + Sync>> {
     let nx = x.len();
     let ny = y.len();
 
@@ -431,7 +505,7 @@ fn meshgrid(
     let mut y_grid = Array2::zeros((ny, nx));
 
     for i in 0..ny {
-        x_grid.column_mut(i).assign(&x);
+        x_grid.row_mut(i).assign(&x);
     }
 
     for j in 0..nx {
@@ -444,36 +518,11 @@ fn meshgrid(
 const HD_CACHE_KEY: &str = "holidays_data";
 const HD_CACHE_EXPIRY: u32 = 86400; // 24 hours in seconds
 
-// Synchronous function to get data from cache or file
-pub fn get_holidays() -> Result<Vec<String>, FutureError> {
-    // Try memcached first
-    let memclient = Client::connect("memcache://127.0.0.1:11211")?;
-
-    if let Ok(Some(cached_data)) = memclient.get::<Vec<String>>(HD_CACHE_KEY) {
-        // Trigger async update in background
-        tokio::spawn(async move {
-            if let Err(e) = update_holidays().await {
-                eprintln!("Background update failed: {}", e);
-            }
-        });
-
-        return Ok(cached_data);
-    }
-
-    // If not in cache, try loading from file
-    match fs::read_to_string("data/holidays.json") {
-        Ok(contents) => {
-            let data: Value = serde_json::from_str(&contents)?;
-            let holidays: Vec<String> = data
-                .get("holidays")
-                .and_then(|h| h.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|h| h.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-
+// Asynchronous function to get holidays data
+pub async fn get_holidays(memclient: Option<&memcache::Client>) -> Result<Holidays, FutureError> {
+    if let Some(memclient) = memclient {
+        if let Ok(Some(cached_bytes)) = memclient.get::<Vec<u8>>(HD_CACHE_KEY) {
+            let cached_data: Holidays = serde_json::from_slice(&cached_bytes)?;
             // Trigger async update in background
             tokio::spawn(async move {
                 if let Err(e) = update_holidays().await {
@@ -481,41 +530,7 @@ pub fn get_holidays() -> Result<Vec<String>, FutureError> {
                 }
             });
 
-            Ok(holidays)
-        }
-        Err(e) => {
-            eprintln!("Error reading file: {}", e);
-            // If file read fails, do a blocking update
-            update_holidays_blocking()
-        }
-    }
-}
-
-// Async function to update data
-async fn update_holidays() -> Result<Vec<String>, Box<dyn Error + Send + Sync>> {
-    let holidays_api: String = env::var("HOLIDAYS_API")?;
-
-    let current_year = Local::now().year();
-    let years: Vec<i32> = (2024..=current_year).collect();
-    let mut holidays = Vec::new();
-    let client = reqwest::Client::new();
-
-    for year in &years {
-        let url = holidays_api.replace("{year}", &year.to_string());
-        let response = client
-            .get(&url)
-            .timeout(std::time::Duration::from_secs(10))
-            .send()
-            .await?
-            .json::<Value>()
-            .await?;
-
-        if let Some(data) = response.get("data").and_then(|d| d.as_array()) {
-            for holiday in data {
-                if let Some(date) = holiday.get("date").and_then(|d| d.as_str()) {
-                    holidays.push(date.to_string());
-                }
-            }
+            return Ok(cached_data);
         }
     }
 
@@ -525,22 +540,68 @@ async fn update_holidays() -> Result<Vec<String>, Box<dyn Error + Send + Sync>> 
         fs::create_dir_all(data_dir)?;
     }
 
+    // If not in cache, try loading from file
+    match fs::read_to_string("data/holidays.json") {
+        Ok(contents) => {
+            let holidays: Holidays = serde_json::from_str(&contents)?;
+
+            // Trigger async update in background
+            tokio::spawn(async move {
+                if let Err(e) = update_holidays().await {
+                    tracing::error!("Background update failed: {}", e);
+                }
+            });
+
+            Ok(holidays)
+        }
+        Err(e) => {
+            tracing::error!("Error reading file: {}", e);
+            // If file read fails, do an immediate update in a blocking manner:
+            let holidays = tokio::task::spawn_blocking(|| {
+                // Create a dedicated runtime on the blocking thread
+                let rt = tokio::runtime::Runtime::new().map_err(|e| Box::new(e) as FutureError)?;
+                rt.block_on(update_holidays())
+            })
+            .await??;
+            Ok(holidays)
+        }
+    }
+}
+
+// Async function to update data
+async fn update_holidays() -> Result<Holidays, Box<dyn Error + Send + Sync>> {
+    let holidays_api: String = env::var("HOLIDAYS_API")?;
+
+    let current_year = Local::now().year();
+    let years: Vec<i32> = (2024..=current_year).collect();
+    let client = reqwest::Client::new();
+    let mut holidays = Holidays {
+        status: "Error".to_string(),
+        data: vec![],
+    };
+
+    for year in &years {
+        let url = holidays_api.replace("{year}", &year.to_string());
+        let response = client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await?;
+
+        holidays = serde_json::from_str::<Holidays>(&response.text().await?)?;
+    }
+
     let json_data = json!({ "holidays": holidays });
     fs::write(
         "data/holidays.json",
         serde_json::to_string_pretty(&json_data)?,
     )?;
 
+    let json_bytes = serde_json::to_vec(&holidays)?;
+
     // Update cache
     let memclient = Client::connect("memcache://127.0.0.1:11211")?;
-    memclient.set(HD_CACHE_KEY, &holidays, HD_CACHE_EXPIRY)?;
+    memclient.set(HD_CACHE_KEY, &json_bytes[..], HD_CACHE_EXPIRY)?;
 
     Ok(holidays)
 }
-
-// Fallback blocking update function
-fn update_holidays_blocking() -> Result<Vec<String>, FutureError> {
-    let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(update_holidays())
-}
-
