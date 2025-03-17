@@ -4,13 +4,21 @@ use crate::models::{
     alerts::{Alert, AlertsDataGroup, AlertsGroup},
     jams::{Jam, JamsGroup},
 };
+use crate::server::CacheState;
+
 use chrono::Utc;
 use sqlx::PgPool;
 use std::env;
+use std::sync::Arc;
 
 use serde::Deserialize;
 
-use axum::{Json, extract::Query, http::StatusCode, response::IntoResponse};
+use axum::{
+    Json,
+    extract::{Query, State},
+    http::StatusCode,
+    response::IntoResponse,
+};
 use memcache::{CommandError, MemcacheError};
 use serde_json::json;
 
@@ -20,10 +28,8 @@ pub enum UpdateError {
     DatabaseError(sqlx::Error),
     CacheError(CacheError),
 }
-
 #[derive(Debug)]
 pub enum CacheError {
-    ConnectionError(Box<dyn std::error::Error>),
     RequestError(memcache::MemcacheError),
     NotFound(memcache::MemcacheError),
     GroupingError(Box<dyn std::error::Error>),
@@ -49,9 +55,6 @@ impl IntoResponse for UpdateError {
 impl IntoResponse for CacheError {
     fn into_response(self) -> axum::response::Response {
         let (status, error_message) = match self {
-            CacheError::ConnectionError(e) => {
-                (StatusCode::BAD_GATEWAY, format!("Connection error: {}", e))
-            }
             CacheError::RequestError(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Request error: {}", e),
@@ -82,19 +85,10 @@ pub struct FilterParams {
 ///
 /// # Returns
 /// * Tuple containing alerts and jams retrieved from the API
-pub async fn update_data_from_api() -> Result<Json<(AlertsDataGroup, JamsGroup)>, UpdateError> {
+pub async fn update_data_from_api(
+    State(cache_state): State<Arc<CacheState>>,
+) -> Result<Json<(AlertsDataGroup, JamsGroup)>, UpdateError> {
     tracing::info!("Starting update_data_from_api request");
-
-    tracing::info!("Connecting to memcache...");
-    let client = match memcache::connect("memcache://127.0.0.1:11211") {
-        Ok(client) => client,
-        Err(e) => {
-            tracing::error!("Failed to connect to memcache: {}", e);
-            return Err(UpdateError::CacheError(CacheError::ConnectionError(
-                Box::new(e),
-            )));
-        }
-    };
 
     let (alerts, jams) = api::request_and_parse().await.map_err(|e| {
         tracing::error!("API Error: {:?}", e);
@@ -130,7 +124,8 @@ pub async fn update_data_from_api() -> Result<Json<(AlertsDataGroup, JamsGroup)>
     );
 
     // Group data
-    let alerts_grouper = match client
+    let alerts_grouper = match cache_state
+        .client
         .get("alerts_grouper")
         .map_err(|e| UpdateError::CacheError(CacheError::RequestError(e)))?
     {
@@ -140,11 +135,11 @@ pub async fn update_data_from_api() -> Result<Json<(AlertsDataGroup, JamsGroup)>
     };
 
     let alerts = alerts_grouper
-        .group(alerts, &client)
+        .group(alerts, Arc::clone(&cache_state))
         .await
         .map_err(|e| UpdateError::CacheError(CacheError::GroupingError(e)))?;
 
-    let prev_alerts: AlertsDataGroup = match client.get("alerts") {
+    let prev_alerts: AlertsDataGroup = match cache_state.client.get("alerts") {
         Ok(Some(prev_alerts)) => prev_alerts,
         Ok(None) => AlertsDataGroup { alerts: vec![] },
         Err(_) => AlertsDataGroup { alerts: vec![] },
@@ -155,23 +150,28 @@ pub async fn update_data_from_api() -> Result<Json<(AlertsDataGroup, JamsGroup)>
 
     // Only set the cache if it not exists
     // because this is reset if the client request the data
-    if client
+    if cache_state
+        .client
         .get::<i64>("last_request_millis")
         .unwrap_or(None)
         .is_none()
     {
         let now = Utc::now().timestamp() * 1000;
-        client
+        cache_state
+            .client
             .set("last_request_millis", now, 600)
             .map_err(|e| UpdateError::CacheError(CacheError::RequestError(e)))?;
         tracing::info!("Set last request millis: {}", now);
     }
 
     tracing::info!("Setting data of alerts in cache");
-    client.set("alerts", &alerts, 3600).map_err(|e| {
-        tracing::error!("Error setting alerts data in cache: {}", e);
-        UpdateError::CacheError(CacheError::RequestError(e))
-    })?;
+    cache_state
+        .client
+        .set("alerts", &alerts, 3600)
+        .map_err(|e| {
+            tracing::error!("Error setting alerts data in cache: {}", e);
+            UpdateError::CacheError(CacheError::RequestError(e))
+        })?;
 
     Ok(Json((alerts, jams)))
 }
@@ -182,25 +182,16 @@ pub async fn update_data_from_api() -> Result<Json<(AlertsDataGroup, JamsGroup)>
 /// * AlertsDataGroup: Grouped alerts data
 pub async fn get_data(
     Query(params): Query<FilterParams>,
+    State(cache_state): State<Arc<CacheState>>,
 ) -> Result<Json<AlertsDataGroup>, UpdateError> {
     // Check for data in cache
 
     tracing::info!("Params received: {:?}", params);
     let mut alerts: Option<_> = None;
 
-    tracing::info!("Connecting to memcache...");
-    let client = match memcache::connect("memcache://127.0.0.1:11211") {
-        Ok(client) => client,
-        Err(e) => {
-            tracing::error!("Failed to connect to memcache: {}", e);
-            return Err(UpdateError::CacheError(CacheError::ConnectionError(
-                Box::new(e),
-            )));
-        }
-    };
-
     tracing::info!("Retrieving last request millis");
-    let min_millis = client
+    let min_millis = cache_state
+        .client
         .get::<i64>("last_request_millis")
         .map_err(|_| {
             UpdateError::CacheError(CacheError::RequestError(MemcacheError::CommandError(
@@ -215,7 +206,7 @@ pub async fn get_data(
         Some(since) => {
             if min_millis > 0 && min_millis <= *since {
                 tracing::info!("Connected to memcache successfully!");
-                alerts = match get_data_from_cache(&client).await {
+                alerts = match get_data_from_cache(&cache_state.client).await {
                     Ok(alerts) => Some(alerts),
                     Err(e) => {
                         tracing::info!("Data not found in cache, retrieving from database...");
@@ -223,16 +214,19 @@ pub async fn get_data(
                         None
                     }
                 };
-                client.delete("alerts").map_err(|_| {
+                cache_state.client.delete("alerts").map_err(|_| {
                     UpdateError::CacheError(CacheError::RequestError(MemcacheError::CommandError(
                         CommandError::KeyNotFound,
                     )))
                 })?;
-                client.delete("last_request_millis").map_err(|_| {
-                    UpdateError::CacheError(CacheError::RequestError(MemcacheError::CommandError(
-                        CommandError::KeyNotFound,
-                    )))
-                })?;
+                cache_state
+                    .client
+                    .delete("last_request_millis")
+                    .map_err(|_| {
+                        UpdateError::CacheError(CacheError::RequestError(
+                            MemcacheError::CommandError(CommandError::KeyNotFound),
+                        ))
+                    })?;
             }
         }
         None => {}
@@ -241,7 +235,7 @@ pub async fn get_data(
     let alerts = match alerts {
         Some(alerts) => alerts,
         None => {
-            let alerts = match get_data_from_database(params, &client).await {
+            let alerts = match get_data_from_database(params, cache_state).await {
                 Ok(alerts) => alerts,
                 Err(e) => {
                     tracing::error!("Error retrieving data from database.");
@@ -283,7 +277,7 @@ pub async fn get_data_from_cache(client: &memcache::Client) -> Result<AlertsData
 /// Get data from database, based on filters passed as args
 pub async fn get_data_from_database(
     filters: FilterParams,
-    memclient: &memcache::Client,
+    cache_state: Arc<CacheState>,
 ) -> Result<AlertsDataGroup, UpdateError> {
     tracing::info!("Retrieving data from database...");
     let pool = connect_to_db()
@@ -317,7 +311,8 @@ pub async fn get_data_from_database(
     tracing::info!("Data found: {}", alerts.alerts.len());
     tracing::info!("Grouping...");
 
-    let alerts_grouper = match memclient
+    let alerts_grouper = match cache_state
+        .client
         .get("alerts_grouper")
         .map_err(|e| UpdateError::CacheError(CacheError::RequestError(e)))?
     {
@@ -327,7 +322,7 @@ pub async fn get_data_from_database(
     };
 
     let alerts = alerts_grouper
-        .group(alerts, &memclient)
+        .group(alerts, Arc::clone(&cache_state))
         .await
         .map_err(|e| UpdateError::CacheError(CacheError::GroupingError(e)))?;
 

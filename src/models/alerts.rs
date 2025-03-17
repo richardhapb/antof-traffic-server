@@ -1,10 +1,7 @@
 use serde::{Deserialize, Serialize, ser::StdError};
-use serde_json::json;
 use sqlx::{FromRow, Row, Type, postgres::PgRow};
-use std::{collections::HashSet, env, error::Error, fs, hash::Hash, path::Path};
+use std::{collections::HashSet, env, error::Error, fs, hash::Hash, path::Path, sync::Arc};
 use uuid::Uuid;
-
-use memcache::Client;
 
 use ndarray::{Array1, Array2};
 
@@ -13,6 +10,7 @@ use chrono_tz::America::Santiago;
 
 use crate::data::connect_to_db;
 use crate::models::errors::EventError;
+use crate::server::CacheState;
 
 type FutureError = Box<dyn StdError + Send + Sync + 'static>;
 
@@ -434,11 +432,11 @@ impl AlertsGrouper {
     pub async fn group(
         &self,
         alerts: AlertsGroup,
-        memclient: &memcache::Client,
+        cache_state: Arc<CacheState>,
     ) -> Result<AlertsDataGroup, Box<dyn std::error::Error + Send + Sync>> {
         let mut alerts_data: AlertsDataGroup = AlertsDataGroup { alerts: vec![] };
 
-        let holidays = get_holidays(Some(&memclient)).await.unwrap_or(Holidays {
+        let holidays = get_holidays(cache_state).await.unwrap_or(Holidays {
             status: "Error".to_string(),
             data: vec![],
         });
@@ -564,19 +562,18 @@ const HD_CACHE_KEY: &str = "holidays_data";
 const HD_CACHE_EXPIRY: u32 = 86400; // 24 hours in seconds
 
 // Asynchronous function to get holidays data
-pub async fn get_holidays(memclient: Option<&memcache::Client>) -> Result<Holidays, FutureError> {
-    if let Some(memclient) = memclient {
-        if let Ok(Some(cached_bytes)) = memclient.get::<Vec<u8>>(HD_CACHE_KEY) {
-            let cached_data: Holidays = serde_json::from_slice(&cached_bytes)?;
-            // Trigger async update in background
-            tokio::spawn(async move {
-                if let Err(e) = update_holidays().await {
-                    eprintln!("Background update failed: {}", e);
-                }
-            });
+pub async fn get_holidays(cache_state: Arc<CacheState>) -> Result<Holidays, FutureError> {
+    if let Ok(Some(cached_bytes)) = cache_state.client.get::<Vec<u8>>(HD_CACHE_KEY) {
+        let cached_data: Holidays = serde_json::from_slice(&cached_bytes)?;
+        // Trigger async update in background
+        tracing::info!("Throwing background holidays update");
+        tokio::spawn(async move {
+            if let Err(e) = update_holidays(&Arc::clone(&cache_state)).await {
+                eprintln!("Background update failed: {}", e);
+            }
+        });
 
-            return Ok(cached_data);
-        }
+        return Ok(cached_data);
     }
 
     // Ensure directory exists and save to file
@@ -585,14 +582,17 @@ pub async fn get_holidays(memclient: Option<&memcache::Client>) -> Result<Holida
         fs::create_dir_all(data_dir)?;
     }
 
+    tracing::info!("Loading holidays from file");
     // If not in cache, try loading from file
     match fs::read_to_string("data/holidays.json") {
         Ok(contents) => {
             let holidays: Holidays = serde_json::from_str(&contents)?;
 
             // Trigger async update in background
+            let cache_state_clone = Arc::clone(&cache_state);
+
             tokio::spawn(async move {
-                if let Err(e) = update_holidays().await {
+                if let Err(e) = update_holidays(&cache_state_clone).await {
                     tracing::error!("Background update failed: {}", e);
                 }
             });
@@ -602,10 +602,10 @@ pub async fn get_holidays(memclient: Option<&memcache::Client>) -> Result<Holida
         Err(e) => {
             tracing::error!("Error reading file: {}", e);
             // If file read fails, do an immediate update in a blocking manner:
-            let holidays = tokio::task::spawn_blocking(|| {
+            let holidays = tokio::task::spawn_blocking(move || {
                 // Create a dedicated runtime on the blocking thread
                 let rt = tokio::runtime::Runtime::new().map_err(|e| Box::new(e) as FutureError)?;
-                rt.block_on(update_holidays())
+                rt.block_on(update_holidays(&Arc::clone(&cache_state)))
             })
             .await??;
             Ok(holidays)
@@ -614,7 +614,9 @@ pub async fn get_holidays(memclient: Option<&memcache::Client>) -> Result<Holida
 }
 
 // Async function to update data
-async fn update_holidays() -> Result<Holidays, Box<dyn Error + Send + Sync>> {
+async fn update_holidays(
+    cache_client: &Arc<CacheState>,
+) -> Result<Holidays, Box<dyn Error + Send + Sync>> {
     let holidays_api: String = env::var("HOLIDAYS_API")?;
 
     let current_year = Local::now().year();
@@ -636,17 +638,18 @@ async fn update_holidays() -> Result<Holidays, Box<dyn Error + Send + Sync>> {
         holidays = serde_json::from_str::<Holidays>(&response.text().await?)?;
     }
 
-    let json_data = json!({ "holidays": holidays });
+    tracing::info!("Writing data of holidays to file {:?}", holidays);
     fs::write(
         "data/holidays.json",
-        serde_json::to_string_pretty(&json_data)?,
+        serde_json::to_string_pretty(&holidays)?,
     )?;
 
     let json_bytes = serde_json::to_vec(&holidays)?;
 
     // Update cache
-    let memclient = Client::connect("memcache://127.0.0.1:11211")?;
-    memclient.set(HD_CACHE_KEY, &json_bytes[..], HD_CACHE_EXPIRY)?;
+    cache_client
+        .client
+        .set(HD_CACHE_KEY, &json_bytes[..], HD_CACHE_EXPIRY)?;
 
     Ok(holidays)
 }

@@ -9,7 +9,9 @@ use memcache::{CommandError, FromMemcacheValue, MemcacheError, ToMemcacheValue};
 
 pub type MemcacheValue<T> = Result<T, MemcacheError>;
 
-pub enum Flags {
+pub const MEMCACHE_URI: &str ="memcache://127.0.0.1:11211";
+
+enum Flags {
     Bytes = 0,
 }
 
