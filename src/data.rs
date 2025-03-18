@@ -1,4 +1,5 @@
 use crate::api;
+use crate::errors::{CacheError, UpdateError};
 use crate::models::alerts::AlertsGrouper;
 use crate::models::{
     alerts::{Alert, AlertsDataGroup, AlertsGroup},
@@ -16,72 +17,26 @@ use serde::Deserialize;
 use axum::{
     Json,
     extract::{Query, State},
-    http::StatusCode,
-    response::IntoResponse,
 };
 use memcache::{CommandError, MemcacheError};
-use serde_json::json;
 
-#[derive(Debug)]
-pub enum UpdateError {
-    ApiError(Box<dyn std::error::Error>),
-    DatabaseError(sqlx::Error),
-    CacheError(CacheError),
-}
-#[derive(Debug)]
-pub enum CacheError {
-    RequestError(memcache::MemcacheError),
-    NotFound(memcache::MemcacheError),
-    GroupingError(Box<dyn std::error::Error>),
-}
-
-impl IntoResponse for UpdateError {
-    fn into_response(self) -> axum::response::Response {
-        let (status, error_message) = match self {
-            UpdateError::ApiError(e) => (StatusCode::BAD_GATEWAY, format!("API error: {}", e)),
-            UpdateError::DatabaseError(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            ),
-            UpdateError::CacheError(e) => {
-                (StatusCode::BAD_GATEWAY, format!("Cache error: {:?}", e))
-            }
-        };
-
-        (status, Json(json!({ "error": error_message }))).into_response()
-    }
-}
-
-impl IntoResponse for CacheError {
-    fn into_response(self) -> axum::response::Response {
-        let (status, error_message) = match self {
-            CacheError::RequestError(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Request error: {}", e),
-            ),
-            CacheError::NotFound(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Key not found: {}", e),
-            ),
-            CacheError::GroupingError(e) => (
-                StatusCode::BAD_GATEWAY,
-                format!("Error grouping data: {}", e),
-            ),
-        };
-
-        (status, Json(json!({ "error": error_message }))).into_response()
-    }
-}
+const ALERTS_CACHE_KEY: &str = "alerts_data";
+const ALERTS_CACHE_EXP: u32 = 3600; // 1 hour
 
 // AXUM HANDLERS
 
+// Filters from url request args
 #[derive(Debug, Deserialize)]
 pub struct FilterParams {
     pub since: Option<i64>, // Millis
     pub until: Option<i64>, // Millis
 }
 
-/// Fetch data from the Waze API and store it in the database
+/// Fetch data from the Waze API and store it in the database and cache
+/// if data exists in cache, add to it and keep unique registers.
+///
+/// # Params
+/// * cache_state: `Arc` with the pointer to global cache state
 ///
 /// # Returns
 /// * Tuple containing alerts and jams retrieved from the API
@@ -139,7 +94,7 @@ pub async fn update_data_from_api(
         .await
         .map_err(|e| UpdateError::CacheError(CacheError::GroupingError(e)))?;
 
-    let prev_alerts: AlertsDataGroup = match cache_state.client.get("alerts") {
+    let prev_alerts: AlertsDataGroup = match cache_state.client.get(ALERTS_CACHE_KEY) {
         Ok(Some(prev_alerts)) => prev_alerts,
         Ok(None) => AlertsDataGroup { alerts: vec![] },
         Err(_) => AlertsDataGroup { alerts: vec![] },
@@ -167,7 +122,7 @@ pub async fn update_data_from_api(
     tracing::info!("Setting data of alerts in cache");
     cache_state
         .client
-        .set("alerts", &alerts, 3600)
+        .set(ALERTS_CACHE_KEY, &alerts, ALERTS_CACHE_EXP)
         .map_err(|e| {
             tracing::error!("Error setting alerts data in cache: {}", e);
             UpdateError::CacheError(CacheError::RequestError(e))
@@ -177,6 +132,10 @@ pub async fn update_data_from_api(
 }
 
 /// Retrieve data from the cache if it exists; otherwise get it from the database
+///
+/// # Params
+/// * params: url request aruments
+/// * cache_state: `Arc` with the pointer to global cache state
 ///
 /// # Returns
 /// * AlertsDataGroup: Grouped alerts data
@@ -214,7 +173,7 @@ pub async fn get_data(
                         None
                     }
                 };
-                cache_state.client.delete("alerts").map_err(|_| {
+                cache_state.client.delete(ALERTS_CACHE_KEY).map_err(|_| {
                     UpdateError::CacheError(CacheError::RequestError(MemcacheError::CommandError(
                         CommandError::KeyNotFound,
                     )))
@@ -250,13 +209,18 @@ pub async fn get_data(
     Ok(Json(alerts))
 }
 
-/// Retrieve data from database or cache if it exists
+/// Retrieve data from cache if it exists
+///
+/// # Params
+/// * memclient: The reference to memcache client connection
 ///
 /// # Returns
-/// * Grouped alerts by location
-pub async fn get_data_from_cache(client: &memcache::Client) -> Result<AlertsDataGroup, CacheError> {
+/// * Result enum with Grouped alerts by location or Cache error
+pub async fn get_data_from_cache(
+    memclient: &memcache::Client,
+) -> Result<AlertsDataGroup, CacheError> {
     tracing::info!("Retrieving data...");
-    let alerts: AlertsDataGroup = match client.get("alerts") {
+    let alerts: AlertsDataGroup = match memclient.get(ALERTS_CACHE_KEY) {
         Ok(Some(alerts)) => alerts,
         Ok(None) => {
             return Err(CacheError::NotFound(MemcacheError::CommandError(
@@ -275,6 +239,13 @@ pub async fn get_data_from_cache(client: &memcache::Client) -> Result<AlertsData
 }
 
 /// Get data from database, based on filters passed as args
+///
+/// # Params
+/// * filters: Filters from url request
+/// * cache_state: Global state with cache connection
+///
+/// # Returns
+/// * Result enum with groupeda alerts by location or Cache error
 pub async fn get_data_from_database(
     filters: FilterParams,
     cache_state: Arc<CacheState>,
@@ -330,6 +301,9 @@ pub async fn get_data_from_database(
 }
 
 /// Create pool connection with postgres
+///
+/// # Returns
+/// * Result enum with pool connection or sqlx error
 pub async fn connect_to_db() -> Result<PgPool, sqlx::Error> {
     let database_url =
         env::var("DATABASE_URL").expect("Environment variable DATABASE_URL must be set");

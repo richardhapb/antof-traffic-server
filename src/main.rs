@@ -5,6 +5,7 @@ mod api;
 mod data;
 mod models;
 mod server;
+mod errors;
 
 use dotenv::dotenv;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};

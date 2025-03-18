@@ -13,6 +13,7 @@ pub struct CacheState {
     pub client: memcache::Client
 }
 
+// Global state for cache, this ensure an stable unique connection
 static CACHE_STATE: OnceLock<Arc<CacheState>> = OnceLock::new();
 
 pub async fn init_cache() -> Arc<CacheState> {
@@ -23,6 +24,7 @@ pub async fn init_cache() -> Arc<CacheState> {
     }).clone()
 }
 
+/// Main server handler
 pub async fn create_server() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Starting server on 0.0.0.0:7070");
     

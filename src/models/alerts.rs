@@ -9,12 +9,12 @@ use chrono::{DateTime, Datelike, Local, TimeZone, Timelike, Utc};
 use chrono_tz::America::Santiago;
 
 use crate::data::connect_to_db;
-use crate::models::errors::EventError;
+use crate::errors::EventError;
 use crate::server::CacheState;
 
 type FutureError = Box<dyn StdError + Send + Sync + 'static>;
 
-// Types of Alerts events
+/// Types of Alerts events
 #[derive(Serialize, Deserialize, Debug, sqlx::Type)]
 #[sqlx(type_name = "varchar", rename_all = "UPPERCASE")]
 #[serde(rename_all = "UPPERCASE")]
@@ -64,45 +64,45 @@ pub struct Location {
 }
 
 /// # API RESPONSE
-/// Element: Type -                       Description
-///
-/// location: Coordinates -               Location per report (X Y - Long-lat)
-/// uuid: String -                        Unique system ID
-/// magvar Integer (0-359)                Event direction (Driver heading at report time. 0 degrees at North, according to the driver’s device)
-/// type: See alert type table            Event type
-/// subtype: See alert sub types table -  Event sub type - depends on atof parameter
-/// reportDescription: String -           Report description (supplied when available)
-/// street: String -                      Street name (as is written in database, no canonical form, may be null)
-/// city: String -                        City and state name [City, State] in case both are available, [State] if not associated with a city. (supplied when available)
-/// country: String -                     (see two letters codes in http://en.wikipedia.org/wiki/ISO_3166-1)
-/// roadType: Integer -                   Road type (see road types)
-/// reportRating: Integer -               User rank between 1-6 ( 6 = high ranked user)
-/// jamUuid: string -                     If the alert is connected to a jam - jam ID
-/// Reliability: 0-10 -                   Reliability score based on user reactions and reporter level
-/// confidence: 0-10 -                    Confidence score based on user reactions
-/// reportByMunicipalityUser: Boolean -   Alert reported by municipality user (partner) Optional.
-/// nThumbsUp: integer -                  Number of thumbs up by users
-
+/// Element: Type     |               Description
+/// ----------------------------------------------------
+/// * location: Coordinates              | Location per report (X Y - Long-lat)
+/// * uuid: String                       | Unique system ID
+/// * magvar Integer (0-359)             | Event direction (Driver heading at report time. 0 degrees at North, according to the driver’s device)
+/// * type: See alert type table         | Event type
+/// * subtype: See alert sub types table | Event sub type - depends on atof parameter
+/// * reportDescription: String          | Report description (supplied when available)
+/// * street: String                     | Street name (as is written in database, no canonical form, may be null)
+/// * city: String                       | City and state name [City, State] in case both are available, [State] if not associated with a city. (supplied when available)
+/// * country: String                    | (see two letters codes in http://en.wikipedia.org/wiki/ISO_3166-1)
+/// * roadType: Integer                  | Road type (see road types)
+/// * reportRating: Integer              | User rank between 1-6 ( 6 = high ranked user)
+/// * jamUuid: string                    | If the alert is connected to a jam - jam ID
+/// * Reliability: 0-10                  | Reliability score based on user reactions and reporter level
+/// * confidence: 0-10                   | Confidence score based on user reactions
+/// * reportByMunicipalityUser: Boolean  | Alert reported by municipality user (partner) Optional.
+/// * nThumbsUp: integer                 | Number of thumbs up by users
+/// ---
 /// ## Road type
-/// Value    |    Type
-///   1        Streets
-///   2        Primary Street
-///   3        Freeways
-///   4        Ramps
-///   5        Trails
-///   6        Primary
-///   7        Secondary
-///   8, 14    4X4 Trails
-///   15       Ferry crossing
-///   9        Walkway
-///   10       Pedestrian
-///   11       Exit
-///   16       Stairway
-///   17       Private road
-///   18       Railroads
-///   19       Runway/Taxiway
-///   20       Parking lot road
-///   21       Service road
+/// ### Value    |    Type
+/// *  1      |  Streets
+/// *  2      |  Primary Street
+/// *  3      |  Freeways
+/// *  4      |  Ramps
+/// *  5      |  Trails
+/// *  6      |  Primary
+/// *  7      |  Secondary
+/// *  8, 14  |  4X4 Trails
+/// *  15     |  Ferry crossing
+/// *  9      |  Walkway
+/// *  10     |  Pedestrian
+/// *  11     |  Exit
+/// *  16     |  Stairway
+/// *  17     |  Private road
+/// *  18     |  Railroads
+/// *  19     |  Runway/Taxiway
+/// *  20     |  Parking lot road
+/// *  21     |  Service road
 
 // Main alerts structure
 #[derive(Serialize, Deserialize, Debug)]
@@ -284,7 +284,8 @@ pub struct AlertsGroup {
     pub alerts: Vec<Alert>,
 }
 
-// Make groups for alerts, by segment according location
+/// Make groups for alerts, by segment according location
+/// this handles the grouping and aggregate data for AlertData
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AlertsGrouper {
     grid: (Array2<f32>, Array2<f32>),
@@ -292,7 +293,7 @@ pub struct AlertsGrouper {
     y_len: usize,
 }
 
-// Extended Alert with aggregate data
+/// Extended Alert with aggregate data and group
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AlertData {
     pub alert: Alert,
@@ -366,7 +367,22 @@ impl Holidays {
 }
 
 impl AlertData {
-    pub async fn new(
+    /// Create a new Alert extended with aggregate
+    /// calculate aggregates and group by week day
+    ///
+    /// # Params
+    /// * alert: Associated alert that is expanded with aggregates
+    /// * holidays: Holidays struct with holidays from the API or cache
+    /// * group: Segment where the alert is located
+    /// * day: Day of the month
+    /// * week_day: Day of the week
+    /// * day_type: `s` for weekday, `f` for weekends or holidays
+    /// * hour: Hour of the day
+    /// * minute: Minute of the hour
+    ///
+    /// # Returns
+    /// * A new AlertData instance
+    pub fn new(
         alert: Alert,
         holidays: &Holidays,
         group: Option<usize>,
@@ -416,6 +432,12 @@ impl AlertData {
 
 impl AlertsGrouper {
     /// Make the initial grid element
+    ///
+    /// # Params
+    /// * grid_dim: A tuple with grid dimensions (x, y)
+    ///
+    /// # Returns
+    /// * A new grouper object
     pub fn new(grid_dim: (usize, usize)) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let mut new_grouper = Self {
             grid: (Array2::zeros((1, 1)), Array2::zeros((1, 1))),
@@ -429,6 +451,12 @@ impl AlertsGrouper {
     }
 
     /// Fill group field with segment and generate aggregate data for each alert
+    ///
+    /// # Params
+    /// * alerts: raw alerts data
+    ///
+    /// # Returns:
+    /// * Result enum with extended grouped alerts or an Error
     pub async fn group(
         &self,
         alerts: AlertsGroup,
@@ -469,8 +497,7 @@ impl AlertsGrouper {
                 None,
                 None,
                 None,
-            )
-            .await;
+            );
 
             alerts_data.alerts.push(alert_data);
         }
@@ -479,6 +506,12 @@ impl AlertsGrouper {
     }
 
     /// Get the indexes of a location based in `x` and `y` coordinates
+    ///
+    /// # Params
+    /// * point: A tuple with coordinates x and y
+    ///
+    /// # Returns
+    /// * Result enum with tuple of indexes (location x and y in `narray`) or an error
     pub fn get_quadrant_indexes(
         &self,
         point: (f32, f32),
@@ -508,7 +541,14 @@ impl AlertsGrouper {
         }
     }
 
-    /// Get quadrant number from indexes `x` and `y`
+    /// Get the consecutive number (quadrant) in the grid, from indexes `x` and `y`
+    ///
+    /// # Params
+    /// * x_pos: x index in `narray`
+    /// * y_pos: y index in `narray`
+    ///
+    /// # Returns
+    /// * The quadrant's number in the grid
     pub fn calc_quadrant(&self, x_pos: usize, y_pos: usize) -> usize {
         self.y_len * x_pos + y_pos + 1
     }
@@ -537,6 +577,10 @@ impl AlertsGrouper {
 }
 
 /// Create the `meshgrid` based on arrays
+///
+/// # Params
+/// * x: Preprocesed array, component x of the grid
+/// * y: Preprocesed array, component y of the grid
 fn meshgrid(
     x: &Array1<f32>,
     y: &Array1<f32>,
@@ -558,10 +602,18 @@ fn meshgrid(
     Ok((x_grid, y_grid))
 }
 
+// Holiday cache data values
 const HD_CACHE_KEY: &str = "holidays_data";
 const HD_CACHE_EXPIRY: u32 = 86400; // 24 hours in seconds
+const HD_PATH: &str = "data/holidays.json";
 
-// Asynchronous function to get holidays data
+/// Get the holidays from cache, the backup file or in last instance from API
+///
+/// # Params
+/// * cache_state: Global cache state with connection to cache provider
+///
+/// # Returns
+/// * Result enum with Holidays or an error
 pub async fn get_holidays(cache_state: Arc<CacheState>) -> Result<Holidays, FutureError> {
     if let Ok(Some(cached_bytes)) = cache_state.client.get::<Vec<u8>>(HD_CACHE_KEY) {
         let cached_data: Holidays = serde_json::from_slice(&cached_bytes)?;
@@ -584,7 +636,7 @@ pub async fn get_holidays(cache_state: Arc<CacheState>) -> Result<Holidays, Futu
 
     tracing::info!("Loading holidays from file");
     // If not in cache, try loading from file
-    match fs::read_to_string("data/holidays.json") {
+    match fs::read_to_string(HD_PATH) {
         Ok(contents) => {
             let holidays: Holidays = serde_json::from_str(&contents)?;
 
@@ -613,9 +665,15 @@ pub async fn get_holidays(cache_state: Arc<CacheState>) -> Result<Holidays, Futu
     }
 }
 
-// Async function to update data
+/// Update cache and file with API response
+///
+/// # Params
+/// * cache_state: Global cache state with connection to cache provider
+///
+/// # Returns
+/// * Result enum with Holidays or an error
 async fn update_holidays(
-    cache_client: &Arc<CacheState>,
+    cache_state: &Arc<CacheState>,
 ) -> Result<Holidays, Box<dyn Error + Send + Sync>> {
     let holidays_api: String = env::var("HOLIDAYS_API")?;
 
@@ -639,15 +697,12 @@ async fn update_holidays(
     }
 
     tracing::info!("Writing data of holidays to file {:?}", holidays);
-    fs::write(
-        "data/holidays.json",
-        serde_json::to_string_pretty(&holidays)?,
-    )?;
+    fs::write(HD_PATH, serde_json::to_string_pretty(&holidays)?)?;
 
     let json_bytes = serde_json::to_vec(&holidays)?;
 
     // Update cache
-    cache_client
+    cache_state
         .client
         .set(HD_CACHE_KEY, &json_bytes[..], HD_CACHE_EXPIRY)?;
 

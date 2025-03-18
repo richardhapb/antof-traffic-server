@@ -3,47 +3,51 @@ use sqlx::FromRow;
 
 use crate::data::connect_to_db;
 
-/// ## Element     |      Value     |     Description
-/// pubMillis: Timestamp -             Publication date (Unix time – milliseconds since epoch)
-/// type: String -                     TRAFFIC_JAM
-/// line List of x and y coordinates - Traffic jam line string (supplied when available)
-/// speed: Float -                     Current average speed on jammed segments in meters/seconds
-/// speedKMH: Float -                  Current average speed on jammed segments in Km/h
-/// length: Integer -                  Jam length in meters
-/// delay: Integer -                   Delay of jam compared to free flow speed, in seconds (in case of block, -1)
-/// street: String -                   Street name (as is written in database, no canonical form. (supplied when available)
-/// city: String -                     City and state name [City, State] in case both are available, [State] if not associated with a city. (supplied when available)
-/// country: String -                  available on EU (world) serve
-/// roadType: Integer -                Road type
-/// startNode: String -                Nearest Junction/steet/city to jam start (supplied when available)
-/// endNode: String -                  Nearest Junction/steet/city to jam end (supplied when available)
-/// level: 0-5 -                       Traffic congestion level (0 = free flow 5 = blocked).
-/// uuid: Longinteger -                Unique jam ID
-/// turnLine: Coordinates -            A set of coordinates of a turn - only when the jam is in a turn (supplied when available)
-/// turnType: String -                 What kind of turn is it - left, right, exit R or L, continue straight or NONE (no info) (supplied when available)
-/// blockingAlertUuid: string -        if the jam is connected to a block (see alerts)&nbsp;
-
+/// # API RESPONSE
+/// Element: type     |     Description
+/// --------------------------------------------------
+/// * pubMillis: Timestamp             |  Publication date (Unix time – milliseconds since epoch)
+/// * type: String                     |  TRAFFIC_JAM
+/// * line List of x and y coordinates |  Traffic jam line string (supplied when available)
+/// * speed: Float                     |  Current average speed on jammed segments in meters/seconds
+/// * speedKMH: Float                  |  Current average speed on jammed segments in Km/h
+/// * length: Integer                  |  Jam length in meters
+/// * delay: Integer                   |  Delay of jam compared to free flow speed, in seconds (in case of block, -1)
+/// * street: String                   |  Street name (as is written in database, no canonical form. (supplied when available)
+/// * city: String                     |  City and state name [City, State] in case both are available, [State] if not associated with a city. (supplied when available)
+/// * country: String                  |  available on EU (world) serve
+/// * roadType: Integer                |  Road type
+/// * startNode: String                |  Nearest Junction/steet/city to jam start (supplied when available)
+/// * endNode: String                  |  Nearest Junction/steet/city to jam end (supplied when available)
+/// * level: 0 -                       |  Traffic congestion level (0 = free flow 5 = blocked).
+/// * uuid: Longinteger                |  Unique jam ID
+/// * turnLine: Coordinates            |  A set of coordinates of a turn - only when the jam is in a turn (supplied when available)
+/// * turnType: String                 |  What kind of turn is it - left, right, exit R or L, continue straight or NONE (no info) (supplied when available)
+/// * blockingAlertUuid: string        |  if the jam is connected to a block (see alerts)&nbsp;
+/// ---
 /// ## Road type
-/// Value    |    Type
-///   1        Streets
-///   2        Primary Street
-///   3        Freeways
-///   4        Ramps
-///   5        Trails
-///   6        Primary
-///   7        Secondary
-///   8, 14    4X4 Trails
-///   15       Ferry crossing
-///   9        Walkway
-///   10       Pedestrian
-///   11       Exit
-///   16       Stairway
-///   17       Private road
-///   18       Railroads
-///   19       Runway/Taxiway
-///   20       Parking lot road
-///   21       Service road
+/// ###  Value    |    Type
+/// ---------------------
+/// *   1     |   Streets
+/// *   2     |   Primary Street
+/// *   3     |   Freeways
+/// *   4     |   Ramps
+/// *   5     |   Trails
+/// *   6     |   Primary
+/// *   7     |   Secondary
+/// *   8, 14 |   4X4 Trails
+/// *   15    |   Ferry crossing
+/// *   9     |   Walkway
+/// *   10    |   Pedestrian
+/// *   11    |   Exit
+/// *   16    |   Stairway
+/// *   17    |   Private road
+/// *   18    |   Railroads
+/// *   19    |   Runway/Taxiway
+/// *   20    |   Parking lot road
+/// *   21    |   Service road
 
+/// Main Jam struct
 #[derive(Serialize, Deserialize, Debug, FromRow)]
 pub struct Jam {
     pub uuid: i64,
@@ -64,6 +68,7 @@ pub struct Jam {
     pub line: Option<Vec<JamLine>>,
 }
 
+/// Jam line, that represents the line with coordinates where is the jam
 #[derive(Serialize, Deserialize, Debug, FromRow)]
 pub struct JamLine {
     #[serde(default)]
@@ -75,6 +80,7 @@ pub struct JamLine {
     pub y: f64,
 }
 
+/// Jam segment, that represents the nodes connections
 #[derive(Serialize, Deserialize, Debug, FromRow)]
 pub struct JamSegment {
     #[serde(default)]
@@ -92,6 +98,7 @@ pub struct JamSegment {
     pub is_forward: bool,
 }
 
+/// Struct with vector of `Jam`
 #[derive(Serialize, Deserialize, Debug)]
 pub struct JamsGroup {
     jams: Vec<Jam>,
@@ -157,6 +164,7 @@ impl JamSegment {
 }
 
 impl JamsGroup {
+    /// Insert the data from the API struct to the database
     pub async fn bulk_insert(&self) -> Result<u64, sqlx::Error> {
         if self.jams.is_empty() {
             return Ok(0);
