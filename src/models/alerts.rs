@@ -15,6 +15,7 @@ use crate::server::CacheState;
 type FutureError = Box<dyn StdError + Send + Sync + 'static>;
 
 /// Types of Alerts events
+#[cfg_attr(test, derive(Clone))]
 #[derive(Serialize, Deserialize, Debug, sqlx::Type)]
 #[sqlx(type_name = "varchar", rename_all = "UPPERCASE")]
 #[serde(rename_all = "UPPERCASE")]
@@ -54,6 +55,7 @@ impl AlertType {
 }
 
 // Location (API response containing an object in this element)
+#[cfg_attr(test, derive(Clone))]
 #[derive(Serialize, Deserialize, Debug, FromRow, Type)]
 #[sqlx(type_name = "int")]
 pub struct Location {
@@ -105,6 +107,7 @@ pub struct Location {
 /// *  21     |  Service road
 
 // Main alerts structure
+#[cfg_attr(test, derive(Clone))]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Alert {
     pub uuid: Uuid,
@@ -154,6 +157,7 @@ impl AlertsGroup {
         }
 
         let pg_pool = connect_to_db().await?;
+        let alerts_len = self.alerts.len();
 
         let (
             mut uuids,
@@ -166,15 +170,15 @@ impl AlertsGroup {
             mut pub_millis,
             mut end_pub_millis,
         ) = (
-            Vec::with_capacity(self.alerts.len()),
-            Vec::with_capacity(self.alerts.len()),
-            Vec::with_capacity(self.alerts.len()),
-            Vec::with_capacity(self.alerts.len()),
-            Vec::with_capacity(self.alerts.len()),
-            Vec::with_capacity(self.alerts.len()),
-            Vec::with_capacity(self.alerts.len()),
-            Vec::with_capacity(self.alerts.len()),
-            Vec::with_capacity(self.alerts.len()),
+            Vec::with_capacity(alerts_len),
+            Vec::with_capacity(alerts_len),
+            Vec::with_capacity(alerts_len),
+            Vec::with_capacity(alerts_len),
+            Vec::with_capacity(alerts_len),
+            Vec::with_capacity(alerts_len),
+            Vec::with_capacity(alerts_len),
+            Vec::with_capacity(alerts_len),
+            Vec::with_capacity(alerts_len),
         );
 
         let mut locations = Vec::with_capacity(self.alerts.len());
@@ -350,7 +354,7 @@ struct Holiday {
 /// Grouped holidays, handle response from API
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Holidays {
-    status: String,
+    status: Option<String>,
     data: Vec<Holiday>,
 }
 
@@ -465,7 +469,7 @@ impl AlertsGrouper {
         let mut alerts_data: AlertsDataGroup = AlertsDataGroup { alerts: vec![] };
 
         let holidays = get_holidays(cache_state).await.unwrap_or(Holidays {
-            status: "Error".to_string(),
+            status: Some("Error".to_string()),
             data: vec![],
         });
 
@@ -681,7 +685,7 @@ async fn update_holidays(
     let years: Vec<i32> = (2024..=current_year).collect();
     let client = reqwest::Client::new();
     let mut holidays = Holidays {
-        status: "Error".to_string(),
+        status: Some("Error".to_string()),
         data: vec![],
     };
 
@@ -707,4 +711,176 @@ async fn update_holidays(
         .set(HD_CACHE_KEY, &json_bytes[..], HD_CACHE_EXPIRY)?;
 
     Ok(holidays)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::init_cache;
+
+    fn setup_alerts() -> AlertsGroup {
+        let alerts: Vec<Alert> = vec![
+            Alert {
+                uuid: uuid::Uuid::parse_str("a0f93cf6-9099-4962-8f9a-72c30186571c").unwrap(),
+                reliability: Some(2),
+                alert_type: Some(AlertType::Accident),
+                road_type: Some(2),
+                magvar: Some(3.0),
+                subtype: Some("Some accident".to_string()),
+                location: Some(Location {
+                    id: 1,
+                    x: -70.39831,
+                    y: -23.651636,
+                }),
+                street: Some("Av. Pedro Aguirre Cerda".to_string()),
+                pub_millis: 1736980027000,
+                end_pub_millis: Some(1736980087000),
+            },
+            Alert {
+                uuid: uuid::Uuid::parse_str("a123f22e-e5e0-4c6c-8a4e-7434c4fd2110").unwrap(),
+                reliability: Some(2),
+                alert_type: Some(AlertType::Accident),
+                road_type: Some(2),
+                magvar: Some(3.3),
+                subtype: Some("Some accident".to_string()),
+                location: Some(Location {
+                    id: 2,
+                    x: -70.37841,
+                    y: -23.625319,
+                }),
+                street: Some("Av. Pedro Aguirre Cerda".to_string()),
+                pub_millis: 1731210357000,
+                end_pub_millis: Some(1731210657000),
+            },
+        ];
+
+        AlertsGroup { alerts }
+    }
+
+    async fn setup_test() -> Arc<CacheState> {
+        // Load test environment variables if needed
+        dotenv::from_filename(".env").ok();
+
+        // Initialize test cache
+        init_cache().await
+    }
+
+    // Ensure correct new AlertData creation with aggregate data
+    #[test]
+    fn test_new_alert_data() {
+        let alerts_group = setup_alerts();
+        let alert = alerts_group.alerts.get(0).unwrap();
+
+        let holidays = Holidays {
+            status: Some("OK".to_string()),
+            data: vec![Holiday { date: "2025-01-23".to_string() },Holiday { date: "2025-01-15".to_string() }]
+        };
+
+        let alert_data = AlertData::new(alert.clone(), &holidays, Some(10), None, None, None, None, None);
+        
+        // pub_millis is holiday in test "2025-01-15"
+        assert_eq!(alert_data.day_type, Some('f'));
+        assert_eq!(alert_data.week_day, Some(2));
+        assert_eq!(alert_data.group, Some(10));
+        assert_eq!(alert_data.day, Some(15));
+        assert_eq!(alert_data.hour, Some(19));
+        assert_eq!(alert_data.minute, Some(27));
+    }
+
+    // Ensure correct new AlertsGrouper creation
+    #[test]
+    fn test_new_alerts_grouper() {
+        let alerts_grouper = AlertsGrouper::new((10, 20)).unwrap();
+
+        // The length of the grids is n - 1 because the number of vortices is n
+        assert_eq!(alerts_grouper.x_len, 9);
+        assert_eq!(alerts_grouper.y_len, 19);
+        assert_eq!(alerts_grouper.grid.0.ncols(), 10);
+        assert_eq!(alerts_grouper.grid.1.nrows(), 20);
+    }
+
+    #[tokio::test]
+    async fn test_alerts_group() {
+        let cache_state = setup_test().await;
+        let alerts_grouper = AlertsGrouper::new((10, 20)).unwrap();
+        let alerts_group = setup_alerts();
+
+        // Update holidays from API
+        let grouped_alerts = alerts_grouper.group(alerts_group, cache_state).await.unwrap();
+        let alert = grouped_alerts.alerts.get(0).unwrap();
+
+        // 2025-01-15 is a workday and group for the location is 82
+        assert_eq!(alert.day_type, Some('s'));
+        assert_eq!(alert.week_day, Some(2));
+        assert_eq!(alert.group, Some(82));
+        assert_eq!(alert.day, Some(15));
+        assert_eq!(alert.hour, Some(19));
+        assert_eq!(alert.minute, Some(27));
+    }
+
+    // Ensure that the indexes of the grid are corrects
+    // uses the same location that group test
+    #[test]
+    fn test_get_quadrant_indexes() {
+        let alerts_grouper = AlertsGrouper::new((10, 20)).unwrap();
+
+        assert_eq!(alerts_grouper.get_quadrant_indexes((-70.39831, -23.651636)).unwrap(), (4, 5));
+    }
+
+    // Ensure that the quadrant returning is correct
+    // uses the same quadrant that group test
+    #[test]
+    fn test_calc_quadrant() {
+        let alerts_grouper = AlertsGrouper::new((10, 20)).unwrap();
+
+        assert_eq!(alerts_grouper.calc_quadrant(4, 5), 82);
+    }
+
+    // Ensures that `get_grid` function set correctly the grid in grouper
+    #[test]
+    fn test_get_grid() {
+        let mut alerts_grouper = AlertsGrouper::new((10, 20)).unwrap();
+        alerts_grouper.get_grid(10, 20).unwrap();
+
+        assert_eq!(alerts_grouper.grid.0.ncols(), 10);
+        assert_eq!(alerts_grouper.grid.1.nrows(), 20);
+
+        // The length of the grids is n - 1 because the number of vortices is n
+        assert_eq!(alerts_grouper.x_len, 9);
+        assert_eq!(alerts_grouper.y_len, 19);
+    }
+
+    // Holidays
+
+    #[tokio::test]
+    async fn test_update_holidays() {
+        let cache_state = setup_test().await;
+
+        // Update holidays from API
+        let result = update_holidays(&Arc::clone(&cache_state)).await;
+
+        // Assert we get an Ok result containing Holidays
+        // and time in localtime (America/Santiago)
+        match result {
+            Ok(holidays) => {
+                assert!(!holidays.data.len() > 0, "Holidays should not be empty");
+            }
+            Err(e) => panic!("Expected Ok with holidays, got error: {:?}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_holidays() {
+        let cache_state = setup_test().await;
+
+        // Get holidays
+        let result = get_holidays(Arc::clone(&cache_state)).await;
+
+        match result {
+            Ok(holidays) => {
+                assert!(!holidays.data.len() > 0, "Holidays should not be empty");
+            }
+            Err(e) => panic!("Expected Ok with holidays, got error: {:?}", e),
+        }
+    }
 }

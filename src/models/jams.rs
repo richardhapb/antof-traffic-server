@@ -171,6 +171,7 @@ impl JamsGroup {
         }
 
         let pg_pool = connect_to_db().await?;
+        let jams_len = self.jams.len();
 
         let (
             mut uuids,
@@ -184,16 +185,16 @@ impl JamsGroup {
             mut pub_millies,
             mut end_pub_millies,
         ) = (
-            Vec::with_capacity(self.jams.len()),
-            Vec::with_capacity(self.jams.len()),
-            Vec::with_capacity(self.jams.len()),
-            Vec::with_capacity(self.jams.len()),
-            Vec::with_capacity(self.jams.len()),
-            Vec::with_capacity(self.jams.len()),
-            Vec::with_capacity(self.jams.len()),
-            Vec::with_capacity(self.jams.len()),
-            Vec::with_capacity(self.jams.len()),
-            Vec::with_capacity(self.jams.len()),
+            Vec::with_capacity(jams_len),
+            Vec::with_capacity(jams_len),
+            Vec::with_capacity(jams_len),
+            Vec::with_capacity(jams_len),
+            Vec::with_capacity(jams_len),
+            Vec::with_capacity(jams_len),
+            Vec::with_capacity(jams_len),
+            Vec::with_capacity(jams_len),
+            Vec::with_capacity(jams_len),
+            Vec::with_capacity(jams_len),
         );
 
         let mut lines: Vec<JamLine> = vec![];
