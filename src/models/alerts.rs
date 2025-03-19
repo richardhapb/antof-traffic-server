@@ -181,7 +181,7 @@ impl AlertsGroup {
             Vec::with_capacity(alerts_len),
         );
 
-        let mut locations = Vec::with_capacity(self.alerts.len());
+        let mut locations = Vec::with_capacity(alerts_len);
 
         // Single iteration over alerts
         for alert in &self.alerts {
@@ -715,9 +715,27 @@ async fn update_holidays(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::server::init_cache;
+    use sqlx::Postgres;
+    use serial_test::serial;
 
+    use super::*;
+    use crate::test_utils::database::{get_test_db_pool, setup_test_env};
+    use crate::test_utils::cache::setup_cache;
+
+    // Clean test database
+    async fn setup_test_db() -> sqlx::Pool<Postgres> {
+        let pool = get_test_db_pool().await;
+
+        // Clear existing data
+        sqlx::raw_sql("DELETE FROM alerts; DELETE FROM alerts_location;")
+            .execute(&pool)
+            .await
+            .expect("Failed to clear test database");
+
+        pool
+    }
+
+    // Create test data
     fn setup_alerts() -> AlertsGroup {
         let alerts: Vec<Alert> = vec![
             Alert {
@@ -728,7 +746,7 @@ mod tests {
                 magvar: Some(3.0),
                 subtype: Some("Some accident".to_string()),
                 location: Some(Location {
-                    id: 1,
+                    id: 0,
                     x: -70.39831,
                     y: -23.651636,
                 }),
@@ -744,7 +762,7 @@ mod tests {
                 magvar: Some(3.3),
                 subtype: Some("Some accident".to_string()),
                 location: Some(Location {
-                    id: 2,
+                    id: 0,
                     x: -70.37841,
                     y: -23.625319,
                 }),
@@ -757,12 +775,85 @@ mod tests {
         AlertsGroup { alerts }
     }
 
-    async fn setup_test() -> Arc<CacheState> {
-        // Load test environment variables if needed
-        dotenv::from_filename(".env").ok();
+    // Insertion to database testing
 
-        // Initialize test cache
-        init_cache().await
+    // The result should be 0 because vec is empty
+    #[tokio::test]
+    #[serial]
+    async fn test_bulk_insert_empty() {
+        setup_test_db().await;
+        let alerts = AlertsGroup { alerts: vec![] };
+        let result = alerts.bulk_insert().await.unwrap();
+        assert_eq!(result, 0);
+    }
+
+    // This should be inserted one time
+    #[tokio::test]
+    #[serial]
+    async fn test_bulk_insert_single_alert() {
+        setup_test_db().await;
+        let alerts = AlertsGroup {
+            alerts: vec![setup_alerts().alerts.get(0).unwrap().clone()],
+        };
+
+        let result = alerts.bulk_insert().await.unwrap();
+        assert_eq!(result, 1);
+
+        // Verify idempotency - inserting same alert again should not affect the DB
+        let repeat_result = alerts.bulk_insert().await.unwrap();
+        assert_eq!(repeat_result, 0);
+    }
+
+    // Should insert both alerts
+    #[tokio::test]
+    #[serial]
+    async fn test_bulk_insert_multiple_alerts() {
+        setup_test_db().await;
+
+        let alerts = setup_alerts();
+        let result = alerts.bulk_insert().await.unwrap();
+        assert_eq!(result, 2);
+    }
+
+    // Database allow insert empty values
+    #[tokio::test]
+    #[serial]
+    async fn test_bulk_insert_with_null_fields() {
+        setup_test_db().await;
+        let mut alert = setup_alerts().alerts.get(1).unwrap().clone();
+        alert.reliability = None;
+        alert.alert_type = None;
+        alert.road_type = None;
+        alert.magvar = None;
+        alert.subtype = None;
+        alert.street = None;
+        alert.end_pub_millis = None;
+
+        let alerts = AlertsGroup {
+            alerts: vec![alert],
+        };
+
+        let result = alerts.bulk_insert().await.unwrap();
+        assert_eq!(result, 1);
+    }
+
+    // Database allow insert empty values
+    #[tokio::test]
+    #[serial]
+    async fn test_bulk_insert_with_mixed_nulls() {
+        setup_test_db().await;
+        let alerts = setup_alerts();
+        let alert1 = alerts.alerts.get(0).unwrap().clone();
+        let mut alert2 = alerts.alerts.get(1).unwrap().clone();
+        alert2.reliability = None;
+        alert2.magvar = None;
+
+        let alerts = AlertsGroup {
+            alerts: vec![alert1, alert2],
+        };
+
+        let result = alerts.bulk_insert().await.unwrap();
+        assert_eq!(result, 2);
     }
 
     // Ensure correct new AlertData creation with aggregate data
@@ -773,11 +864,27 @@ mod tests {
 
         let holidays = Holidays {
             status: Some("OK".to_string()),
-            data: vec![Holiday { date: "2025-01-23".to_string() },Holiday { date: "2025-01-15".to_string() }]
+            data: vec![
+                Holiday {
+                    date: "2025-01-23".to_string(),
+                },
+                Holiday {
+                    date: "2025-01-15".to_string(),
+                },
+            ],
         };
 
-        let alert_data = AlertData::new(alert.clone(), &holidays, Some(10), None, None, None, None, None);
-        
+        let alert_data = AlertData::new(
+            alert.clone(),
+            &holidays,
+            Some(10),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+
         // pub_millis is holiday in test "2025-01-15"
         assert_eq!(alert_data.day_type, Some('f'));
         assert_eq!(alert_data.week_day, Some(2));
@@ -801,12 +908,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_alerts_group() {
-        let cache_state = setup_test().await;
+        let cache_state = setup_cache().await;
         let alerts_grouper = AlertsGrouper::new((10, 20)).unwrap();
         let alerts_group = setup_alerts();
 
         // Update holidays from API
-        let grouped_alerts = alerts_grouper.group(alerts_group, cache_state).await.unwrap();
+        let grouped_alerts = alerts_grouper
+            .group(alerts_group, cache_state)
+            .await
+            .unwrap();
         let alert = grouped_alerts.alerts.get(0).unwrap();
 
         // 2025-01-15 is a workday and group for the location is 82
@@ -824,7 +934,12 @@ mod tests {
     fn test_get_quadrant_indexes() {
         let alerts_grouper = AlertsGrouper::new((10, 20)).unwrap();
 
-        assert_eq!(alerts_grouper.get_quadrant_indexes((-70.39831, -23.651636)).unwrap(), (4, 5));
+        assert_eq!(
+            alerts_grouper
+                .get_quadrant_indexes((-70.39831, -23.651636))
+                .unwrap(),
+            (4, 5)
+        );
     }
 
     // Ensure that the quadrant returning is correct
@@ -852,9 +967,11 @@ mod tests {
 
     // Holidays
 
+    // Update holidays from API
     #[tokio::test]
     async fn test_update_holidays() {
-        let cache_state = setup_test().await;
+        setup_test_env();
+        let cache_state = setup_cache().await;
 
         // Update holidays from API
         let result = update_holidays(&Arc::clone(&cache_state)).await;
@@ -869,9 +986,11 @@ mod tests {
         }
     }
 
+    // Get holidays from cache, file or API
     #[tokio::test]
     async fn test_get_holidays() {
-        let cache_state = setup_test().await;
+        setup_test_env();
+        let cache_state = setup_cache().await;
 
         // Get holidays
         let result = get_holidays(Arc::clone(&cache_state)).await;

@@ -10,7 +10,6 @@ chrono = "0.4.11"
 chrono-tz = "0.10.1"
 dotenv = "0.15.0"
 memcache = "0.18.0"
-mockall = "0.13.1"
 ndarray = { version = "0.16.1", features = ["std", "serde"] }
 reqwest = { version = "0.12.12", features = ["blocking", "json"] }
 serde = { version = "1.0.217", features = ["derive"] }
@@ -20,3 +19,7 @@ tokio = { version = "1.43.0", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.16.0", features = ["v4", "serde"] }
+
+[dev-dependencies]
+serial_test = "3.2.0"
+

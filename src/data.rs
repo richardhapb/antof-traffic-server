@@ -8,8 +8,6 @@ use crate::models::{
 use crate::server::CacheState;
 
 use chrono::Utc;
-use sqlx::PgPool;
-use std::env;
 use std::sync::Arc;
 
 use serde::Deserialize;
@@ -304,8 +302,21 @@ pub async fn get_data_from_database(
 ///
 /// # Returns
 /// * Result enum with pool connection or sqlx error
-pub async fn connect_to_db() -> Result<PgPool, sqlx::Error> {
-    let database_url =
-        env::var("DATABASE_URL").expect("Environment variable DATABASE_URL must be set");
-    PgPool::connect(&database_url).await
+pub async fn connect_to_db() -> Result<sqlx::Pool<sqlx::Postgres>, sqlx::Error> {
+    #[cfg(test)]
+    use crate::test_utils::database::get_test_db_pool;
+    #[cfg(test)]
+    return Ok(get_test_db_pool().await);
+
+    #[cfg(not(test))]
+    {
+        let database_url = std::env::var("DATABASE_URL")
+            .expect("DATABASE_URL must be set");
+            
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&database_url)
+            .await
+    }
 }
+
