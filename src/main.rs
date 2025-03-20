@@ -6,7 +6,7 @@ mod data;
 mod models;
 mod server;
 mod errors;
-mod test_utils;
+mod utils;
 
 use dotenv::dotenv;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
-use crate::data::connect_to_db;
+use crate::utils::connect_to_db;
 
 /// # API RESPONSE
 /// Element: type     |     Description

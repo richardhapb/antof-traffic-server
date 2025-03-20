@@ -8,7 +8,7 @@ use ndarray::{Array1, Array2};
 use chrono::{DateTime, Datelike, Local, TimeZone, Timelike, Utc};
 use chrono_tz::America::Santiago;
 
-use crate::data::connect_to_db;
+use crate::utils::connect_to_db;
 use crate::errors::EventError;
 use crate::server::CacheState;
 
@@ -719,8 +719,7 @@ mod tests {
     use serial_test::serial;
 
     use super::*;
-    use crate::test_utils::database::{get_test_db_pool, setup_test_env};
-    use crate::test_utils::cache::setup_cache;
+    use crate::utils::test::{get_test_db_pool, setup_test_env, setup_cache};
 
     // Clean test database
     async fn setup_test_db() -> sqlx::Pool<Postgres> {
