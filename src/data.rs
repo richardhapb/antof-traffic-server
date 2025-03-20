@@ -2,8 +2,8 @@ use crate::api;
 use crate::errors::{CacheError, UpdateError};
 use crate::models::alerts::AlertsGrouper;
 use crate::models::{
-    alerts::{Alert, AlertsDataGroup, AlertsGroup},
-    jams::{Jam, JamsGroup},
+    alerts::{AlertsDataGroup, AlertsGroup},
+    jams::JamsGroup,
 };
 use crate::server::CacheState;
 use crate::utils::connect_to_db;
@@ -59,10 +59,10 @@ pub async fn update_data_from_api(
         UpdateError::DatabaseError(e)
     })?;
 
-    let alerts_ends = Alert::fill_end_pub_millis(&alerts)
+    let alerts_ends = alerts.fill_end_pub_millis()
         .await
         .map_err(UpdateError::DatabaseError)?;
-    let jams_ends = Jam::fill_end_pub_millis(&jams)
+    let jams_ends = jams.fill_end_pub_millis()
         .await
         .map_err(UpdateError::DatabaseError)?;
 

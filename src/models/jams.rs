@@ -104,31 +104,6 @@ pub struct JamsGroup {
     jams: Vec<Jam>,
 }
 
-impl Jam {
-    pub async fn fill_end_pub_millis(last_data: &JamsGroup) -> Result<u64, sqlx::Error> {
-        let mut uuids = Vec::with_capacity(last_data.jams.len());
-
-        for jam in &last_data.jams {
-            let uuid = jam.uuid as i64;
-            uuids.push(uuid);
-        }
-
-        let pool = connect_to_db().await?;
-
-        let result = sqlx::query!(
-            r#"
-        UPDATE jams SET end_pub_millis = EXTRACT(EPOCH FROM NOW() AT TIME ZONE 'UTC')
-        WHERE uuid <> ALL($1::bigint[]) AND end_pub_millis IS NULL
-    "#,
-            &uuids
-        )
-        .execute(&pool)
-        .await?;
-
-        Ok(result.rows_affected())
-    }
-}
-
 impl JamLine {
     pub fn new(id: Option<i32>, jams_uuid: i64, position: Option<i8>, x: f64, y: f64) -> Self {
         return JamLine {
@@ -164,7 +139,8 @@ impl JamSegment {
 }
 
 impl JamsGroup {
-    /// Insert the data from the API struct to the database
+    /// Insert a group of jams from API in a bulk insert
+    /// ensuring the efficiency and avoid bucles
     pub async fn bulk_insert(&self) -> Result<u64, sqlx::Error> {
         if self.jams.is_empty() {
             return Ok(0);
@@ -283,6 +259,31 @@ impl JamsGroup {
                 &segments.iter().map(|s| s.to_node as i64).collect::<Vec<i64>>(),
                 &segments.iter().map(|s| s.is_forward).collect::<Vec<bool>>()
             ).execute(&pg_pool).await?;
+
+        Ok(result.rows_affected())
+    }
+
+    /// Fill end pub millis field in database with current time for all
+    /// data without it and is not present in last data
+    pub async fn fill_end_pub_millis(&self) -> Result<u64, sqlx::Error> {
+        let mut uuids = Vec::with_capacity(self.jams.len());
+
+        for jam in self.jams.iter() {
+            let uuid = jam.uuid as i64;
+            uuids.push(uuid);
+        }
+
+        let pool = connect_to_db().await?;
+
+        let result = sqlx::query!(
+            r#"
+        UPDATE jams SET end_pub_millis = EXTRACT(EPOCH FROM NOW() AT TIME ZONE 'UTC')
+        WHERE uuid <> ALL($1::bigint[]) AND end_pub_millis IS NULL
+    "#,
+            &uuids
+        )
+        .execute(&pool)
+        .await?;
 
         Ok(result.rows_affected())
     }

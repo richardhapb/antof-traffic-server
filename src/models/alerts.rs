@@ -8,9 +8,9 @@ use ndarray::{Array1, Array2};
 use chrono::{DateTime, Datelike, Local, TimeZone, Timelike, Utc};
 use chrono_tz::America::Santiago;
 
-use crate::utils::connect_to_db;
 use crate::errors::EventError;
 use crate::server::CacheState;
+use crate::utils::connect_to_db;
 
 type FutureError = Box<dyn StdError + Send + Sync + 'static>;
 
@@ -125,32 +125,9 @@ pub struct Alert {
     pub end_pub_millis: Option<i64>,
 }
 
-impl Alert {
-    /// Fill end pub millis field in database with current time
-    pub async fn fill_end_pub_millis(last_data: &AlertsGroup) -> Result<u64, sqlx::Error> {
-        let mut uuids = Vec::with_capacity(last_data.alerts.len());
-
-        for alert in &last_data.alerts {
-            uuids.push(alert.uuid);
-        }
-
-        let pool = connect_to_db().await?;
-
-        let result = sqlx::query!(
-            r#"
-        UPDATE alerts SET end_pub_millis = EXTRACT(EPOCH FROM NOW() AT TIME ZONE 'UTC')
-        WHERE uuid <> ALL($1::uuid[]) AND end_pub_millis IS NULL
-    "#,
-            &uuids
-        )
-        .execute(&pool)
-        .await?;
-
-        Ok(result.rows_affected())
-    }
-}
-
 impl AlertsGroup {
+    /// Insert a group of alerts from API in a bulk insert
+    /// ensuring the efficiency and avoid bucles
     pub async fn bulk_insert(&self) -> Result<u64, sqlx::Error> {
         if self.alerts.is_empty() {
             return Ok(0);
@@ -242,6 +219,30 @@ impl AlertsGroup {
     )
     .execute(&pg_pool)
     .await?;
+
+        Ok(result.rows_affected())
+    }
+
+    /// Fill end pub millis field in database with current time for all
+    /// data without it and is not present in last data
+    pub async fn fill_end_pub_millis(&self) -> Result<u64, sqlx::Error> {
+        let mut uuids = Vec::with_capacity(self.alerts.len());
+
+        for alert in self.alerts.iter() {
+            uuids.push(alert.uuid);
+        }
+
+        let pool = connect_to_db().await?;
+
+        let result = sqlx::query!(
+            r#"
+        UPDATE alerts SET end_pub_millis = EXTRACT(EPOCH FROM NOW() AT TIME ZONE 'UTC')
+        WHERE uuid <> ALL($1::uuid[]) AND end_pub_millis IS NULL
+    "#,
+            &uuids
+        )
+        .execute(&pool)
+        .await?;
 
         Ok(result.rows_affected())
     }
@@ -715,11 +716,11 @@ async fn update_holidays(
 
 #[cfg(test)]
 mod tests {
-    use sqlx::Postgres;
     use serial_test::serial;
+    use sqlx::Postgres;
 
     use super::*;
-    use crate::utils::test::{get_test_db_pool, setup_test_env, setup_cache};
+    use crate::utils::test::{get_test_db_pool, setup_cache, setup_test_env};
 
     // Clean test database
     async fn setup_test_db() -> sqlx::Pool<Postgres> {
@@ -751,7 +752,7 @@ mod tests {
                 }),
                 street: Some("Av. Pedro Aguirre Cerda".to_string()),
                 pub_millis: 1736980027000,
-                end_pub_millis: Some(1736980087000),
+                end_pub_millis: None,
             },
             Alert {
                 uuid: uuid::Uuid::parse_str("a123f22e-e5e0-4c6c-8a4e-7434c4fd2110").unwrap(),
@@ -767,7 +768,7 @@ mod tests {
                 }),
                 street: Some("Av. Pedro Aguirre Cerda".to_string()),
                 pub_millis: 1731210357000,
-                end_pub_millis: Some(1731210657000),
+                end_pub_millis: None,
             },
         ];
 
@@ -853,6 +854,39 @@ mod tests {
 
         let result = alerts.bulk_insert().await.unwrap();
         assert_eq!(result, 2);
+    }
+
+    // This function fill the end pub millis field with current time
+    // if alert is not present in last request and end pub miliis is empty
+    #[tokio::test]
+    #[serial]
+    async fn test_fill_end_pub_millis() {
+        let pool = setup_test_db().await;
+        // Insertion of two alerts
+        let alerts = setup_alerts();
+        let rows_affected = alerts.bulk_insert().await.unwrap();
+
+        assert_eq!(rows_affected, 2);
+
+        let query = r#"
+            SELECT a.*, l.x, l.y
+            FROM alerts a
+            LEFT JOIN alerts_location l ON a.location_id = l.id
+        "#;
+
+        // The second alert is absent; the end pub millis should be updated
+        let alerts = AlertsGroup {
+            alerts: vec![alerts.alerts.get(0).unwrap().clone()],
+        };
+        let rows_affected = alerts.fill_end_pub_millis().await.unwrap();
+
+        // Get data from database and create group
+        let alerts: Vec<Alert> = sqlx::query_as(&query).fetch_all(&pool).await.unwrap();
+        let alerts = AlertsGroup { alerts };
+
+        assert_eq!(rows_affected, 1); // One should be updated
+        assert!(alerts.alerts.get(0).unwrap().end_pub_millis.is_none());
+        assert!(alerts.alerts.get(1).unwrap().end_pub_millis.is_some()); // This has been inserted
     }
 
     // Ensure correct new AlertData creation with aggregate data
