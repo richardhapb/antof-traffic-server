@@ -60,9 +60,9 @@ impl AlertType {
 #[sqlx(type_name = "int")]
 pub struct Location {
     #[serde(skip)]
-    id: i32,
-    x: f32,
-    y: f32,
+    pub id: i32,
+    pub x: f32,
+    pub y: f32,
 }
 
 /// # API RESPONSE
@@ -717,63 +717,9 @@ async fn update_holidays(
 #[cfg(test)]
 mod tests {
     use serial_test::serial;
-    use sqlx::Postgres;
 
     use super::*;
-    use crate::utils::test::{get_test_db_pool, setup_cache, setup_test_env};
-
-    // Clean test database
-    async fn setup_test_db() -> sqlx::Pool<Postgres> {
-        let pool = get_test_db_pool().await;
-
-        // Clear existing data
-        sqlx::raw_sql("DELETE FROM alerts; DELETE FROM alerts_location;")
-            .execute(&pool)
-            .await
-            .expect("Failed to clear test database");
-
-        pool
-    }
-
-    // Create test data
-    fn setup_alerts() -> AlertsGroup {
-        let alerts: Vec<Alert> = vec![
-            Alert {
-                uuid: uuid::Uuid::parse_str("a0f93cf6-9099-4962-8f9a-72c30186571c").unwrap(),
-                reliability: Some(2),
-                alert_type: Some(AlertType::Accident),
-                road_type: Some(2),
-                magvar: Some(3.0),
-                subtype: Some("Some accident".to_string()),
-                location: Some(Location {
-                    id: 0,
-                    x: -70.39831,
-                    y: -23.651636,
-                }),
-                street: Some("Av. Pedro Aguirre Cerda".to_string()),
-                pub_millis: 1736980027000,
-                end_pub_millis: None,
-            },
-            Alert {
-                uuid: uuid::Uuid::parse_str("a123f22e-e5e0-4c6c-8a4e-7434c4fd2110").unwrap(),
-                reliability: Some(2),
-                alert_type: Some(AlertType::Accident),
-                road_type: Some(2),
-                magvar: Some(3.3),
-                subtype: Some("Some accident".to_string()),
-                location: Some(Location {
-                    id: 0,
-                    x: -70.37841,
-                    y: -23.625319,
-                }),
-                street: Some("Av. Pedro Aguirre Cerda".to_string()),
-                pub_millis: 1731210357000,
-                end_pub_millis: None,
-            },
-        ];
-
-        AlertsGroup { alerts }
-    }
+    use crate::utils::test::{setup_cache, setup_test_env, setup_alerts, setup_test_db};
 
     // Insertion to database testing
 
