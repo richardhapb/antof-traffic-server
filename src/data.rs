@@ -337,6 +337,7 @@ async fn group_alerts(
             tracing::error!("Error setting alerts data in cache: {}", e);
             UpdateError::CacheError(CacheError::RequestError(e))
         })?;
+    tracing::info!("Data inserted to cache");
 
     Ok(alerts)
 }

@@ -120,7 +120,8 @@ pub struct Alert {
     pub subtype: Option<String>,
     pub location: Option<Location>,
     pub street: Option<String>,
-    #[serde(rename(deserialize = "pubMillis"))]
+    #[serde(rename(serialize = "pub_millis", deserialize = "pubMillis"))]
+    #[serde(alias="pub_millis")]
     pub pub_millis: i64,
     pub end_pub_millis: Option<i64>,
 }
@@ -702,7 +703,7 @@ async fn update_holidays(
         holidays = serde_json::from_str::<Holidays>(&response.text().await?)?;
     }
 
-    tracing::info!("Writing data of holidays to file {:?}", holidays);
+    tracing::debug!("Writing data of holidays to file {:?}", holidays);
     fs::write(HD_PATH, serde_json::to_string_pretty(&holidays)?)?;
 
     let json_bytes = serde_json::to_vec(&holidays)?;
@@ -981,5 +982,49 @@ mod tests {
             }
             Err(e) => panic!("Expected Ok with holidays, got error: {:?}", e),
         }
+    }
+
+    // Test serialization/deserialization for pub_millis field
+    #[test]
+    fn test_pub_millis_serde() {
+        // API JSON (using pubMillis)
+        let api_json = r#"{
+            "uuid": "550e8400-e29b-41d4-a716-446655440000",
+            "pubMillis": 1234567890,
+            "reliability": 5,
+            "type": "ACCIDENT",
+            "location": {
+                "x": -70.39831,
+                "y": -23.651636
+            }
+        }"#;
+
+        // Cache JSON (using pub_millis)
+        let cache_json = r#"{
+            "uuid": "550e8400-e29b-41d4-a716-446655440000",
+            "pub_millis": 1234567890,
+            "reliability": 5,
+            "type": "ACCIDENT",
+            "location": {
+                "x": -70.39831,
+                "y": -23.651636
+            }
+        }"#;
+
+        // Test deserializing from API format
+        let alert_from_api: Alert = serde_json::from_str(api_json).unwrap();
+        assert_eq!(alert_from_api.pub_millis, 1234567890);
+
+        // Test deserializing from cache format
+        let alert_from_cache: Alert = serde_json::from_str(cache_json).unwrap();
+        assert_eq!(alert_from_cache.pub_millis, 1234567890);
+
+        // Test serializing to cache format
+        let serialized = serde_json::to_string(&alert_from_api).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        
+        // Verify it uses pub_millis when serializing
+        assert!(json.get("pub_millis").is_some());
+        assert!(json.get("pubMillis").is_none());
     }
 }
