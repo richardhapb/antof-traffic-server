@@ -19,10 +19,10 @@ use axum::{
 };
 use memcache::{CommandError, MemcacheError};
 
-const ALERTS_CACHE_KEY: &str = "alerts_data";
+pub const ALERTS_CACHE_KEY: &str = "alerts_data";
 const ALERTS_CACHE_EXP: u32 = 3600; // 1 hour
 
-const LAST_UPDATE_KEY: &str = "last_request_millis";
+pub const LAST_UPDATE_KEY: &str = "last_request_millis";
 const LAST_UPDATE_EXP: u32 = 3600; // 1 hour
 
 // AXUM HANDLERS
@@ -389,6 +389,43 @@ mod tests {
         // Clean
         cache_state.client.delete(ALERTS_CACHE_KEY).unwrap();
 
+        assert_eq!(alerts.alerts.len(), 2);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_get_data_from_database() {
+        setup_test_db().await;
+        let cache_state = setup_cache().await;
+        let alerts = setup_alerts();
+
+        // Insert two alerts to database
+        alerts.bulk_insert().await.unwrap();
+
+        // This since value is lower than only one alert
+        let filters = FilterParams {
+            since: Some(1735980027000),
+            until: None,
+        };
+
+        let alerts = get_data_from_database(filters, Arc::clone(&cache_state))
+            .await
+            .unwrap();
+
+        // Should return only one because the since filter
+        assert_eq!(alerts.alerts.len(), 1);
+
+        // Second test case
+
+        // This since value is lower than two alerts
+        let filters = FilterParams {
+            since: Some(1730980027000),
+            until: None,
+        };
+
+        let alerts = get_data_from_database(filters, cache_state).await.unwrap();
+
+        // Should return both alerts
         assert_eq!(alerts.alerts.len(), 2);
     }
 }
