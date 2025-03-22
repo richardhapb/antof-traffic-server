@@ -25,6 +25,8 @@ const ALERTS_CACHE_EXP: u32 = 3600; // 1 hour
 pub const LAST_UPDATE_KEY: &str = "last_request_millis";
 const LAST_UPDATE_EXP: u32 = 3600; // 1 hour
 
+const ALERTS_BEGIN_TIMESTAMP: i64 = 1727740800000;
+
 // AXUM HANDLERS
 
 // Filters from url request args
@@ -104,20 +106,6 @@ pub async fn get_data(
                         None
                     }
                 };
-
-                // Clear data for avoid send again same data
-                cache_state.client.delete(ALERTS_CACHE_KEY).map_err(|_| {
-                    UpdateError::CacheError(CacheError::RequestError(MemcacheError::CommandError(
-                        CommandError::KeyNotFound,
-                    )))
-                })?;
-
-                // Clear last register, this indicates that there is not new data in cache
-                cache_state.client.delete(LAST_UPDATE_KEY).map_err(|_| {
-                    UpdateError::CacheError(CacheError::RequestError(MemcacheError::CommandError(
-                        CommandError::KeyNotFound,
-                    )))
-                })?;
             }
         }
         None => {}
@@ -127,7 +115,7 @@ pub async fn get_data(
     let alerts = match alerts {
         Some(alerts) => alerts,
         None => {
-            let alerts = match get_data_from_database(params, cache_state).await {
+            let alerts = match get_data_from_database(params, Arc::clone(&cache_state)).await {
                 Ok(alerts) => alerts,
                 Err(e) => {
                     tracing::error!("Error retrieving data from database.");
@@ -138,6 +126,20 @@ pub async fn get_data(
             alerts
         }
     };
+
+    // Clear data for avoid send again same data
+    cache_state.client.delete(ALERTS_CACHE_KEY).map_err(|_| {
+        UpdateError::CacheError(CacheError::RequestError(MemcacheError::CommandError(
+            CommandError::KeyNotFound,
+        )))
+    })?;
+
+    // Clear last register, this indicates that there is not new data in cache
+    cache_state.client.delete(LAST_UPDATE_KEY).map_err(|_| {
+        UpdateError::CacheError(CacheError::RequestError(MemcacheError::CommandError(
+            CommandError::KeyNotFound,
+        )))
+    })?;
 
     Ok(Json(alerts))
 }
@@ -188,7 +190,7 @@ pub async fn get_data_from_database(
         .await
         .map_err(|e| UpdateError::DatabaseError(e))?;
 
-    let since = filters.since.unwrap_or(1722470400000); // 24-08-01 by default
+    let since = filters.since.unwrap_or(ALERTS_BEGIN_TIMESTAMP); // 24-08-01 by default
 
     let query = r#"
     SELECT a.*, l.x, l.y

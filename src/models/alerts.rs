@@ -120,7 +120,7 @@ pub struct Alert {
     pub subtype: Option<String>,
     pub location: Option<Location>,
     pub street: Option<String>,
-    #[serde(rename = "pubMillis")]
+    #[serde(rename(deserialize = "pubMillis"))]
     pub pub_millis: i64,
     pub end_pub_millis: Option<i64>,
 }
@@ -301,6 +301,7 @@ pub struct AlertsGrouper {
 /// Extended Alert with aggregate data and group
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AlertData {
+    #[serde(flatten)]
     pub alert: Alert,
 
     // Calculated data
