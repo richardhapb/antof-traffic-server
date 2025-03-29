@@ -339,12 +339,20 @@ pub struct AlertsDataGroup {
 
 /// Concatenate two structs by unique uuid
 impl AlertsDataGroup {
+    /// Concatenate alerts data without duplicates
     pub fn concat(self, another: Self) -> Self {
         let unique_alerts: HashSet<_> = self.alerts.into_iter().chain(another.alerts).collect();
 
         Self {
             alerts: unique_alerts.into_iter().collect(),
         }
+    }
+
+    /// Set alerts in a date range between `init_pub_millis` and `end_pub_millis`
+    /// inplace for avoid memory duplicates
+    pub fn filter_range(&mut self, init_pub_millis: i64, end_pub_millis: i64) {
+        self.alerts
+            .retain(|a| a.alert.pub_millis >= init_pub_millis && a.alert.pub_millis <= end_pub_millis);
     }
 }
 
@@ -630,7 +638,7 @@ pub async fn get_holidays(cache_state: Arc<CacheState>) -> Result<Holidays, Futu
             tracing::info!("Throwing background holidays update");
             tokio::spawn(async move {
                 if let Err(e) = update_holidays(&cache_state_clone).await {
-                    eprintln!("Background update failed: {}", e);
+                    tracing::error!("Background update failed: {}", e);
                 }
             });
 

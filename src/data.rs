@@ -8,6 +8,7 @@ use crate::models::{
 use crate::server::CacheState;
 use crate::utils::connect_to_db;
 
+use std::cmp::{max, min};
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -21,6 +22,9 @@ use memcache::{CommandError, MemcacheError};
 
 pub const ALERTS_CACHE_KEY: &str = "alerts_data";
 const ALERTS_CACHE_EXP: u32 = 604800; // One week
+
+const ALERTS_GROUPER_CACHE_KEY: &str = "alerts_grouper";
+const ALERTS_GROUPER_CACHE_EXP: u32 = 604800; // One week 
 
 pub const MIN_PUB_MILLIS: &str = "min_pub_millis";
 pub const MAX_PUB_MILLIS: &str = "max_pub_millis";
@@ -60,7 +64,10 @@ pub async fn update_data_from_api(
 
     insert_and_update_data(&alerts, &jams).await?;
 
-    let alerts = group_alerts(alerts, cache_state).await?;
+    let alerts = group_alerts(alerts, Arc::clone(&cache_state)).await?;
+    let alerts = concat_alerts_and_storage_to_cache(cache_state, alerts)?;
+
+    // TODO: Isolate the retrieved alerts
 
     Ok(Json((alerts, jams)))
 }
@@ -82,7 +89,10 @@ pub async fn get_data(
     tracing::info!("Params received: {:?}", params);
     let mut alerts: Option<_> = None;
 
-    tracing::info!("Retrieving last request millis");
+    let now = Utc::now().timestamp() * 1000;
+    let since = max(ALERTS_BEGIN_TIMESTAMP, params.since.unwrap_or(ALERTS_BEGIN_TIMESTAMP));
+    let until = min(now, params.until.unwrap_or(now));
+
     let min_millis = cache_state
         .client
         .get::<i64>(MIN_PUB_MILLIS)
@@ -91,7 +101,7 @@ pub async fn get_data(
                 CommandError::KeyNotFound,
             )))
         })?
-        .unwrap_or(-1);
+        .unwrap_or(since);
 
     let max_millis = cache_state
         .client
@@ -101,29 +111,25 @@ pub async fn get_data(
                 CommandError::KeyNotFound,
             )))
         })?
-        .unwrap_or(-1);
+        .unwrap_or(until);
 
     tracing::info!("Retrieving data from cache with params");
     tracing::info!("min pub_millis: {}", min_millis);
     tracing::info!("max pub_millis: {}", max_millis);
 
     // If the data from cache is larger than the data requested, return the cache
-    match &params.since {
-        // Only retrieve from cache if since is present
-        Some(since) => {
-            if min_millis > 0 && min_millis <= *since && max_millis >= params.until.unwrap_or(-2) - UPDATE_UNTIL_THRESHOLD {
-                // Try to get data from cache
-                alerts = match get_data_from_cache(&cache_state.client).await {
-                    Ok(alerts) => Some(alerts),
-                    Err(e) => {
-                        tracing::info!("Data not found in cache, retrieving from database...");
-                        tracing::info!("{:?}", e);
-                        None
-                    }
-                };
-            }        }
-        None => {}
-    };
+    // Only retrieve from cache if since is present
+    if min_millis <= since && max_millis >= until - UPDATE_UNTIL_THRESHOLD {
+        // Try to get data from cache
+        alerts = match get_data_from_cache(&cache_state.client, &params).await {
+            Ok(alerts) => Some(alerts),
+            Err(e) => {
+                tracing::info!("Data not found in cache, retrieving from database...");
+                tracing::info!("{:?}", e);
+                None
+            }
+        };
+    }
 
     // Calculate params
     let params = calculate_params(min_millis, max_millis, params);
@@ -131,8 +137,22 @@ pub async fn get_data(
     // If alerts is `None` retrieve data from database.
     let alerts = match alerts {
         Some(a) => a,
-        None => get_data_from_database(params, Arc::clone(&cache_state)).await?,
+        None => get_data_from_database(&params, Arc::clone(&cache_state)).await?,
     };
+
+    // Set the minimum `since` query to the cache
+    cache_state
+        .client
+        .set(MIN_PUB_MILLIS, since, ALERTS_CACHE_EXP)
+        .map_err(|e| UpdateError::Cache(CacheError::Request(e)))?;
+    tracing::info!("Set min pub_millis: {}", since);
+
+    // Set the maximum `until` query to the cache if it exists
+    cache_state
+        .client
+        .set(MAX_PUB_MILLIS, until, ALERTS_CACHE_EXP)
+        .map_err(|e| UpdateError::Cache(CacheError::Request(e)))?;
+    tracing::info!("Set max pub_millis: {}", until);
 
     Ok(Json(alerts))
 }
@@ -175,8 +195,9 @@ pub fn calculate_params(min_millis: i64, max_millis: i64, params: FilterParams) 
     let params_since = params.since.unwrap_or(min_millis);
     let params_until = params.until.unwrap_or(max_millis);
 
-    let mut since = std::cmp::min(min_millis, params_since);
-    let mut until = std::cmp::max(max_millis, params_until);
+    // Get the edge of requested data
+    let mut since = min(min_millis, params_since);
+    let mut until = max(max_millis, params_until);
 
     // Only retrieve the least amount of data
     if since < min_millis && until <= max_millis {
@@ -187,21 +208,29 @@ pub fn calculate_params(min_millis: i64, max_millis: i64, params: FilterParams) 
 
     FilterParams {
         since: Some(since),
-        until: Some(until)
+        until: Some(until),
     }
-
 }
 
 /// Retrieve data from cache if it exists
 ///
 /// # Params
-/// * memclient: The reference to memcache client connection
+/// * `memclient`: The reference to memcache client connection
+/// * `params`: Parameters of request, that shoud contain `since` and `until`
 ///
 /// # Returns
 /// * Result enum with [`AlertsDataGroup`] or [`CacheError`]
-pub async fn get_data_from_cache(memclient: &memcache::Client) -> Result<AlertsDataGroup, CacheError> {
+pub async fn get_data_from_cache(
+    memclient: &memcache::Client,
+    params: &FilterParams,
+) -> Result<AlertsDataGroup, CacheError> {
     tracing::info!("Retrieving data...");
-    let alerts: AlertsDataGroup = match memclient.get(ALERTS_CACHE_KEY) {
+
+    let now = Utc::now().timestamp() * 1000;
+    let since = max(ALERTS_BEGIN_TIMESTAMP, params.since.unwrap_or(ALERTS_BEGIN_TIMESTAMP));
+    let until = min(now, params.until.unwrap_or(now));
+
+    let mut alerts: AlertsDataGroup = match memclient.get(ALERTS_CACHE_KEY) {
         Ok(Some(alerts)) => alerts,
         Ok(None) => {
             return Err(CacheError::NotFound(MemcacheError::CommandError(
@@ -214,6 +243,7 @@ pub async fn get_data_from_cache(memclient: &memcache::Client) -> Result<AlertsD
         }
     };
 
+    alerts.filter_range(since, until);
     tracing::info!("Data found: {}", alerts.alerts.len());
 
     Ok(alerts)
@@ -222,33 +252,32 @@ pub async fn get_data_from_cache(memclient: &memcache::Client) -> Result<AlertsD
 /// Get data from database, based on filters passed as args
 ///
 /// # Params
-/// * filters: Filters from url request
+/// * params: Filters from url request
 /// * cache_state: Global state with cache connection
 ///
 /// # Returns
 /// * Result enum with [`AlertsDataGroup`] or [`CacheError`]
 pub async fn get_data_from_database(
-    filters: FilterParams,
+    params: &FilterParams,
     cache_state: Arc<CacheState>,
 ) -> Result<AlertsDataGroup, UpdateError> {
     tracing::info!("Retrieving data from database...");
     let pool = connect_to_db().await.map_err(UpdateError::Database)?;
 
-    let since = filters.since.unwrap_or(ALERTS_BEGIN_TIMESTAMP); // 24-08-01 by default
+    let now = Utc::now().timestamp() * 1000;
+    let since = max(ALERTS_BEGIN_TIMESTAMP, params.since.unwrap_or(ALERTS_BEGIN_TIMESTAMP));
+    let until = min(now, params.until.unwrap_or(now));
 
-    let query = r#"
+    let query = format!(
+        r#"
     SELECT a.*, l.x, l.y
     FROM alerts a
     LEFT JOIN alerts_location l ON a.location_id = l.id
     WHERE pub_millis
-    "#;
-
-    let time_filter = match filters.until {
-        Some(until) => format!("BETWEEN {} and {}", since, until),
-        None => format!(">= {}", since),
-    };
-
-    let query = format!("{} {}", query, time_filter);
+    BETWEEN {} and {}
+    "#,
+        since, until
+    );
 
     let alerts: AlertsGroup = match sqlx::query_as(&query).fetch_all(&pool).await {
         Ok(alerts) => AlertsGroup { alerts },
@@ -258,41 +287,15 @@ pub async fn get_data_from_database(
         }
     };
 
-    tracing::info!("Data found: {}", alerts.alerts.len());
     tracing::info!("Grouping...");
 
-    let alerts_grouper = match cache_state
-        .client
-        .get("alerts_grouper")
-        .map_err(|e| UpdateError::Cache(CacheError::Request(e)))?
-    {
-        Some(alerts_grouper) => alerts_grouper,
-        None => AlertsGrouper::new((10, 20)).map_err(|e| UpdateError::Cache(CacheError::Grouping(e)))?,
-    };
+    let alerts = group_alerts(alerts, Arc::clone(&cache_state)).await?;
 
-    let alerts = alerts_grouper
-        .group(alerts, Arc::clone(&cache_state))
-        .await
-        .map_err(|e| UpdateError::Cache(CacheError::Grouping(e)))?;
+    // Update data in cache and concatenate
+    let mut alerts = concat_alerts_and_storage_to_cache(cache_state, alerts)?;
+    alerts.filter_range(since, until);
 
-    // Set the minimum `since` query to the cache
-    cache_state
-        .client
-        .set(MIN_PUB_MILLIS, since, ALERTS_CACHE_EXP)
-        .map_err(|e| UpdateError::Cache(CacheError::Request(e)))?;
-    tracing::info!("Set min pub_millis: {}", since);
-
-    let until = filters.until.unwrap_or_else(|| Utc::now().timestamp());
-
-    // Set the maximum `until` query to the cache if it exists
-    cache_state
-        .client
-        .set(MAX_PUB_MILLIS, until, ALERTS_CACHE_EXP)
-        .map_err(|e| UpdateError::Cache(CacheError::Request(e)))?;
-    tracing::info!("Set max pub_millis: {}", until);
-
-    // Get the alerts from the cache and concatenate with new data
-    let alerts = concat_alerts_and_storage_to_cache(cache_state, alerts)?;
+    tracing::info!("Data found: {}", alerts.alerts.len());
 
     Ok(alerts)
 }
@@ -339,27 +342,37 @@ async fn insert_and_update_data(alerts: &AlertsGroup, jams: &JamsGroup) -> Resul
 ///
 /// # Returns
 /// * Result with new [`AlertsDataGroup`] or an [`UpdateError`]
-async fn group_alerts(
+pub async fn group_alerts(
     alerts: AlertsGroup,
     cache_state: Arc<CacheState>,
 ) -> Result<AlertsDataGroup, UpdateError> {
     // Group data, try get from cache the grouper
     let alerts_grouper = match cache_state
         .client
-        .get("alerts_grouper")
+        .get(ALERTS_GROUPER_CACHE_KEY)
         .map_err(|e| UpdateError::Cache(CacheError::Request(e)))?
     {
         Some(alerts_grouper) => alerts_grouper,
-        None => AlertsGrouper::new((10, 20)).map_err(|e| UpdateError::Cache(CacheError::Grouping(e)))?,
+        None => {
+            let alerts_grouper =
+                AlertsGrouper::new((10, 20)).map_err(|e| UpdateError::Cache(CacheError::Grouping(e)))?;
+            cache_state
+                .client
+                .set(
+                    ALERTS_GROUPER_CACHE_KEY,
+                    &alerts_grouper,
+                    ALERTS_GROUPER_CACHE_EXP,
+                )
+                .map_err(|e| UpdateError::Cache(CacheError::Request(e)))?;
+
+            alerts_grouper
+        }
     };
 
     let alerts = alerts_grouper
         .group(alerts, Arc::clone(&cache_state))
         .await
         .map_err(|e| UpdateError::Cache(CacheError::Grouping(e)))?;
-
-    // Update data in cache and concatenate
-    let alerts = concat_alerts_and_storage_to_cache(cache_state, alerts)?;
 
     Ok(alerts)
 }
@@ -372,7 +385,7 @@ async fn group_alerts(
 ///
 /// # Returns
 /// * The concatenated alerts.
-fn concat_alerts_and_storage_to_cache(
+pub fn concat_alerts_and_storage_to_cache(
     cache_state: Arc<CacheState>,
     alerts: AlertsDataGroup,
 ) -> Result<AlertsDataGroup, UpdateError> {
@@ -409,8 +422,17 @@ mod tests {
         let cache_state = setup_cache().await;
         cache_state.client.delete(ALERTS_CACHE_KEY).unwrap();
 
+        let until = Some(Utc::now().timestamp() * 1000);
+
         // Is empty, should return an error
-        let result = get_data_from_cache(&cache_state.client).await;
+        let result = get_data_from_cache(
+            &cache_state.client,
+            &FilterParams {
+                since: Some(ALERTS_BEGIN_TIMESTAMP),
+                until,
+            },
+        )
+        .await;
 
         // Should return an error indicating doesnt exist
         assert!(matches!(
@@ -441,12 +463,27 @@ mod tests {
             .set(ALERTS_CACHE_KEY, &alerts, ALERTS_CACHE_EXP)
             .unwrap();
 
-        let alerts = get_data_from_cache(&cache_state.client).await.unwrap();
+        let until = Some(Utc::now().timestamp() * 1000);
+
+        // Only retrieve one alert
+        let since = Some(
+            max(
+                alerts.alerts.first().unwrap().alert.pub_millis,
+                alerts.alerts.get(1).unwrap().alert.pub_millis,
+            ) - 1000,
+        );
+
+        println!("{:?} - {:?}", since, until);
+
+        // Only retrieve one alert - since limits to the max pub_millis - 1000
+        let alerts = get_data_from_cache(&cache_state.client, &FilterParams { since, until })
+            .await
+            .unwrap();
 
         // Clean
         cache_state.client.delete(ALERTS_CACHE_KEY).unwrap();
 
-        assert_eq!(alerts.alerts.len(), 2);
+        assert_eq!(alerts.alerts.len(), 1);
     }
 
     #[tokio::test]
@@ -465,7 +502,7 @@ mod tests {
             until: None,
         };
 
-        let alerts = get_data_from_database(filters, Arc::clone(&cache_state))
+        let alerts = get_data_from_database(&filters, Arc::clone(&cache_state))
             .await
             .unwrap();
 
@@ -480,7 +517,7 @@ mod tests {
             until: None,
         };
 
-        let alerts = get_data_from_database(filters, cache_state).await.unwrap();
+        let alerts = get_data_from_database(&filters, cache_state).await.unwrap();
 
         // Should return both alerts
         assert_eq!(alerts.alerts.len(), 2);
