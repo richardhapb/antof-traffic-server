@@ -1,6 +1,5 @@
 use antof_traffic::server::{init_cache, create_server};
 use antof_traffic::data::{LAST_UPDATE_KEY, ALERTS_CACHE_KEY};
-use reqwest;
 use tokio::task::JoinHandle;
 use chrono::Utc;
 use serial_test::serial;
@@ -97,7 +96,7 @@ async fn test_old_data() {
     let response_get = reqwest::get(url).await.unwrap().text().await.unwrap();
 
     // Should be contain data
-    assert!(response_get.len() > 0);
+    assert!(!response_get.is_empty());
     handler.abort();
     let _ = handler.await;
 }

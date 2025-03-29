@@ -49,7 +49,7 @@ impl AlertType {
             "JAM" => Ok(AlertType::Jam),
             "MISC" => Ok(AlertType::Misc),
             "ROAD_CLOSED" => Ok(AlertType::RoadClosed),
-            _ => Err(EventError::DeserializeError("Invalid Alert type")),
+            _ => Err(EventError::Deserialize("Invalid Alert type")),
         }
     }
 }
@@ -121,7 +121,7 @@ pub struct Alert {
     pub location: Option<Location>,
     pub street: Option<String>,
     #[serde(rename(serialize = "pub_millis", deserialize = "pubMillis"))]
-    #[serde(alias="pub_millis")]
+    #[serde(alias = "pub_millis")]
     pub pub_millis: i64,
     pub end_pub_millis: Option<i64>,
 }
@@ -164,7 +164,7 @@ impl AlertsGroup {
         // Single iteration over alerts
         for alert in &self.alerts {
             uuids.push(alert.uuid);
-            reliabilities.push(alert.reliability.map(|ar| ar as i16));
+            reliabilities.push(alert.reliability);
             types.push(
                 alert
                     .alert_type
@@ -172,13 +172,13 @@ impl AlertsGroup {
                     .map(|at| at.as_str())
                     .unwrap_or_default(),
             );
-            road_types.push(alert.road_type.map(|rt| rt as i16));
-            magvars.push(alert.magvar.map(|am| am as f32));
+            road_types.push(alert.road_type);
+            magvars.push(alert.magvar);
             locations.push(&alert.location);
             subtypes.push(alert.subtype.clone());
             streets.push(alert.street.clone());
-            pub_millis.push(alert.pub_millis as i64);
-            end_pub_millis.push(alert.end_pub_millis.map(|e| e as i64));
+            pub_millis.push(alert.pub_millis);
+            end_pub_millis.push(alert.end_pub_millis);
         }
 
         let locations_ids = sqlx::query!(
@@ -389,33 +389,23 @@ impl AlertData {
     ///
     /// # Returns
     /// * A new AlertData instance
-    pub fn new(
-        alert: Alert,
-        holidays: &Holidays,
-        group: Option<usize>,
-        day: Option<usize>,
-        week_day: Option<usize>,
-        day_type: Option<char>,
-        hour: Option<usize>,
-        minute: Option<usize>,
-    ) -> Self {
+    pub fn new(alert: Alert, holidays: &Holidays, group: Option<usize>) -> Self {
         let utc_timestamp = alert.pub_millis;
 
         // Convert milliseconds timestamp to DateTime<Utc>
-        let utc_time =
-            DateTime::<Utc>::from_timestamp_millis(utc_timestamp).expect("Invalid timestamp");
+        let utc_time = DateTime::<Utc>::from_timestamp_millis(utc_timestamp).expect("Invalid timestamp");
 
         // Convert to Santiago timezone
         let cl_time = Santiago.from_utc_datetime(&utc_time.naive_utc());
 
         // Extract time components
-        let hour = Some(hour.unwrap_or(cl_time.hour() as usize));
-        let minute = Some(minute.unwrap_or(cl_time.minute() as usize));
-        let day = Some(day.unwrap_or(cl_time.day() as usize));
-        let week_day = Some(week_day.unwrap_or(cl_time.weekday().num_days_from_monday() as usize));
+        let hour = Some(cl_time.hour() as usize);
+        let minute = Some(cl_time.minute() as usize);
+        let day = Some(cl_time.day() as usize);
+        let week_day = Some(cl_time.weekday().num_days_from_monday() as usize);
 
         // Determine if it is weekend or holiday
-        let day_type = Some(day_type.unwrap_or_else(|| {
+        let day_type = Some({
             if cl_time.weekday().num_days_from_monday() >= 5
                 || holidays.contains(&cl_time.format("%Y-%m-%d").to_string())
             {
@@ -423,7 +413,7 @@ impl AlertData {
             } else {
                 's' // Regular day
             }
-        }));
+        });
 
         Self {
             alert,
@@ -499,11 +489,6 @@ impl AlertsGrouper {
                         0
                     }
                 }),
-                None,
-                None,
-                None,
-                None,
-                None,
             );
 
             alerts_data.alerts.push(alert_data);
@@ -561,11 +546,7 @@ impl AlertsGrouper {
     }
 
     /// Create the grid of the segments in the map
-    fn get_grid(
-        &mut self,
-        xdiv: usize,
-        ydiv: usize,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    fn get_grid(&mut self, xdiv: usize, ydiv: usize) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Antofagasta coodinates bounds
         let xmin = -70.43627;
         let xmax = -70.36259;
@@ -599,11 +580,11 @@ fn meshgrid(
     let mut y_grid = Array2::zeros((ny, nx));
 
     for i in 0..ny {
-        x_grid.row_mut(i).assign(&x);
+        x_grid.row_mut(i).assign(x);
     }
 
     for j in 0..nx {
-        y_grid.column_mut(j).assign(&y);
+        y_grid.column_mut(j).assign(y);
     }
 
     Ok((x_grid, y_grid))
@@ -611,7 +592,7 @@ fn meshgrid(
 
 // Holiday cache data values
 const HD_CACHE_KEY: &str = "holidays_data";
-const HD_CACHE_EXPIRY: u32 = 86400; // 24 hours in seconds
+const HD_CACHE_EXPIRY: u32 = 2592000; // 30 days in seconds
 const HD_PATH: &str = "data/holidays.json";
 
 /// Get the holidays from cache, the backup file or in last instance from API
@@ -624,13 +605,6 @@ const HD_PATH: &str = "data/holidays.json";
 pub async fn get_holidays(cache_state: Arc<CacheState>) -> Result<Holidays, FutureError> {
     if let Ok(Some(cached_bytes)) = cache_state.client.get::<Vec<u8>>(HD_CACHE_KEY) {
         let cached_data: Holidays = serde_json::from_slice(&cached_bytes)?;
-        // Trigger async update in background
-        tracing::info!("Throwing background holidays update");
-        tokio::spawn(async move {
-            if let Err(e) = update_holidays(&Arc::clone(&cache_state)).await {
-                eprintln!("Background update failed: {}", e);
-            }
-        });
 
         return Ok(cached_data);
     }
@@ -641,6 +615,7 @@ pub async fn get_holidays(cache_state: Arc<CacheState>) -> Result<Holidays, Futu
         fs::create_dir_all(data_dir)?;
     }
 
+    // Load from file while cache is retrieving
     tracing::info!("Loading holidays from file");
     // If not in cache, try loading from file
     match fs::read_to_string(HD_PATH) {
@@ -648,11 +623,14 @@ pub async fn get_holidays(cache_state: Arc<CacheState>) -> Result<Holidays, Futu
             let holidays: Holidays = serde_json::from_str(&contents)?;
 
             // Trigger async update in background
+            // once a month (when cache expires)
             let cache_state_clone = Arc::clone(&cache_state);
 
+            // Trigger async update in background
+            tracing::info!("Throwing background holidays update");
             tokio::spawn(async move {
                 if let Err(e) = update_holidays(&cache_state_clone).await {
-                    tracing::error!("Background update failed: {}", e);
+                    eprintln!("Background update failed: {}", e);
                 }
             });
 
@@ -679,9 +657,7 @@ pub async fn get_holidays(cache_state: Arc<CacheState>) -> Result<Holidays, Futu
 ///
 /// # Returns
 /// * Result enum with Holidays or an error
-async fn update_holidays(
-    cache_state: &Arc<CacheState>,
-) -> Result<Holidays, Box<dyn Error + Send + Sync>> {
+async fn update_holidays(cache_state: &Arc<CacheState>) -> Result<Holidays, Box<dyn Error + Send + Sync>> {
     let holidays_api: String = env::var("HOLIDAYS_API")?;
 
     let current_year = Local::now().year();
@@ -721,7 +697,7 @@ mod tests {
     use serial_test::serial;
 
     use super::*;
-    use crate::utils::test::{setup_cache, setup_test_env, setup_alerts, setup_test_db};
+    use crate::utils::test::{setup_alerts, setup_cache, setup_test_db, setup_test_env};
 
     // Insertion to database testing
 
@@ -741,7 +717,7 @@ mod tests {
     async fn test_bulk_insert_single_alert() {
         setup_test_db().await;
         let alerts = AlertsGroup {
-            alerts: vec![setup_alerts().alerts.get(0).unwrap().clone()],
+            alerts: vec![setup_alerts().alerts.first().unwrap().clone()],
         };
 
         let result = alerts.bulk_insert().await.unwrap();
@@ -777,9 +753,7 @@ mod tests {
         alert.street = None;
         alert.end_pub_millis = None;
 
-        let alerts = AlertsGroup {
-            alerts: vec![alert],
-        };
+        let alerts = AlertsGroup { alerts: vec![alert] };
 
         let result = alerts.bulk_insert().await.unwrap();
         assert_eq!(result, 1);
@@ -791,7 +765,7 @@ mod tests {
     async fn test_bulk_insert_with_mixed_nulls() {
         setup_test_db().await;
         let alerts = setup_alerts();
-        let alert1 = alerts.alerts.get(0).unwrap().clone();
+        let alert1 = alerts.alerts.first().unwrap().clone();
         let mut alert2 = alerts.alerts.get(1).unwrap().clone();
         alert2.reliability = None;
         alert2.magvar = None;
@@ -824,16 +798,16 @@ mod tests {
 
         // The second alert is absent; the end pub millis should be updated
         let alerts = AlertsGroup {
-            alerts: vec![alerts.alerts.get(0).unwrap().clone()],
+            alerts: vec![alerts.alerts.first().unwrap().clone()],
         };
         let rows_affected = alerts.fill_end_pub_millis().await.unwrap();
 
         // Get data from database and create group
-        let alerts: Vec<Alert> = sqlx::query_as(&query).fetch_all(&pool).await.unwrap();
+        let alerts: Vec<Alert> = sqlx::query_as(query).fetch_all(&pool).await.unwrap();
         let alerts = AlertsGroup { alerts };
 
         assert_eq!(rows_affected, 1); // One should be updated
-        assert!(alerts.alerts.get(0).unwrap().end_pub_millis.is_none());
+        assert!(alerts.alerts.first().unwrap().end_pub_millis.is_none());
         assert!(alerts.alerts.get(1).unwrap().end_pub_millis.is_some()); // This has been inserted
     }
 
@@ -841,7 +815,7 @@ mod tests {
     #[test]
     fn test_new_alert_data() {
         let alerts_group = setup_alerts();
-        let alert = alerts_group.alerts.get(0).unwrap();
+        let alert = alerts_group.alerts.first().unwrap();
 
         let holidays = Holidays {
             status: Some("OK".to_string()),
@@ -855,16 +829,7 @@ mod tests {
             ],
         };
 
-        let alert_data = AlertData::new(
-            alert.clone(),
-            &holidays,
-            Some(10),
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
+        let alert_data = AlertData::new(alert.clone(), &holidays, Some(10));
 
         // pub_millis is holiday in test "2025-01-15"
         assert_eq!(alert_data.day_type, Some('f'));
@@ -894,11 +859,8 @@ mod tests {
         let alerts_group = setup_alerts();
 
         // Update holidays from API
-        let grouped_alerts = alerts_grouper
-            .group(alerts_group, cache_state)
-            .await
-            .unwrap();
-        let alert = grouped_alerts.alerts.get(0).unwrap();
+        let grouped_alerts = alerts_grouper.group(alerts_group, cache_state).await.unwrap();
+        let alert = grouped_alerts.alerts.first().unwrap();
 
         // 2025-01-15 is a workday and group for the location is 82
         assert_eq!(alert.day_type, Some('s'));
@@ -1022,7 +984,7 @@ mod tests {
         // Test serializing to cache format
         let serialized = serde_json::to_string(&alert_from_api).unwrap();
         let json: serde_json::Value = serde_json::from_str(&serialized).unwrap();
-        
+
         // Verify it uses pub_millis when serializing
         assert!(json.get("pub_millis").is_some());
         assert!(json.get("pubMillis").is_none());

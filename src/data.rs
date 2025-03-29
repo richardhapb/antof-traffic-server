@@ -52,7 +52,7 @@ pub async fn update_data_from_api(
     // Get data from API
     let (alerts, jams) = api::request_and_parse().await.map_err(|e| {
         tracing::error!("API Error: {:?}", e);
-        UpdateError::ApiError(e)
+        UpdateError::Api(e)
     })?;
 
     insert_and_update_data(&alerts, &jams).await?;
@@ -84,7 +84,7 @@ pub async fn get_data(
         .client
         .get::<i64>(LAST_UPDATE_KEY)
         .map_err(|_| {
-            UpdateError::CacheError(CacheError::RequestError(MemcacheError::CommandError(
+            UpdateError::Cache(CacheError::Request(MemcacheError::CommandError(
                 CommandError::KeyNotFound,
             )))
         })?
@@ -113,35 +113,40 @@ pub async fn get_data(
 
     // If alerts is `None` retrieve data from database.
     let alerts = match alerts {
-        Some(alerts) => alerts,
-        None => {
-            let alerts = match get_data_from_database(params, Arc::clone(&cache_state)).await {
-                Ok(alerts) => alerts,
-                Err(e) => {
-                    tracing::error!("Error retrieving data from database.");
-                    return Err(e);
-                }
-            };
-
-            alerts
-        }
+        Some(a) => a,
+        None => get_data_from_database(params, Arc::clone(&cache_state)).await?,
     };
+
+    // Clear alerts from cache to avoid sending repeated data
+    clear_alerts_cache(cache_state)?;
+
+    Ok(Json(alerts))
+}
+
+/// Clear the pub millis reference to last update from API and alerts from cache
+///
+/// # Params
+/// * `cache_state`: Reference to cache state
+/// 
+/// # Returns
+/// * `UpdateError` if the data cannot be deleted
+fn clear_alerts_cache(cache_state: Arc<CacheState>) -> Result<(), UpdateError> {
 
     // Clear data for avoid send again same data
     cache_state.client.delete(ALERTS_CACHE_KEY).map_err(|_| {
-        UpdateError::CacheError(CacheError::RequestError(MemcacheError::CommandError(
+        UpdateError::Cache(CacheError::Request(MemcacheError::CommandError(
             CommandError::KeyNotFound,
         )))
     })?;
 
     // Clear last register, this indicates that there is not new data in cache
     cache_state.client.delete(LAST_UPDATE_KEY).map_err(|_| {
-        UpdateError::CacheError(CacheError::RequestError(MemcacheError::CommandError(
+        UpdateError::Cache(CacheError::Request(MemcacheError::CommandError(
             CommandError::KeyNotFound,
         )))
     })?;
 
-    Ok(Json(alerts))
+    Ok(())
 }
 
 /// Retrieve data from cache if it exists
@@ -151,9 +156,7 @@ pub async fn get_data(
 ///
 /// # Returns
 /// * Result enum with [`AlertsDataGroup`] or [`CacheError`]
-pub async fn get_data_from_cache(
-    memclient: &memcache::Client,
-) -> Result<AlertsDataGroup, CacheError> {
+pub async fn get_data_from_cache(memclient: &memcache::Client) -> Result<AlertsDataGroup, CacheError> {
     tracing::info!("Retrieving data...");
     let alerts: AlertsDataGroup = match memclient.get(ALERTS_CACHE_KEY) {
         Ok(Some(alerts)) => alerts,
@@ -164,7 +167,7 @@ pub async fn get_data_from_cache(
         }
         Err(e) => {
             tracing::error!("Failed to retrieve alerts from cache: {}", e);
-            return Err(CacheError::RequestError(e));
+            return Err(CacheError::Request(e));
         }
     };
 
@@ -186,9 +189,7 @@ pub async fn get_data_from_database(
     cache_state: Arc<CacheState>,
 ) -> Result<AlertsDataGroup, UpdateError> {
     tracing::info!("Retrieving data from database...");
-    let pool = connect_to_db()
-        .await
-        .map_err(|e| UpdateError::DatabaseError(e))?;
+    let pool = connect_to_db().await.map_err(UpdateError::Database)?;
 
     let since = filters.since.unwrap_or(ALERTS_BEGIN_TIMESTAMP); // 24-08-01 by default
 
@@ -210,7 +211,7 @@ pub async fn get_data_from_database(
         Ok(alerts) => AlertsGroup { alerts },
         Err(e) => {
             tracing::error!("Error retrieving data from database {}", e);
-            return Err(UpdateError::DatabaseError(e));
+            return Err(UpdateError::Database(e));
         }
     };
 
@@ -220,17 +221,18 @@ pub async fn get_data_from_database(
     let alerts_grouper = match cache_state
         .client
         .get("alerts_grouper")
-        .map_err(|e| UpdateError::CacheError(CacheError::RequestError(e)))?
+        .map_err(|e| UpdateError::Cache(CacheError::Request(e)))?
     {
         Some(alerts_grouper) => alerts_grouper,
-        None => AlertsGrouper::new((10, 20))
-            .map_err(|e| UpdateError::CacheError(CacheError::GroupingError(e)))?,
+        None => {
+            AlertsGrouper::new((10, 20)).map_err(|e| UpdateError::Cache(CacheError::Grouping(e)))?
+        }
     };
 
     let alerts = alerts_grouper
         .group(alerts, Arc::clone(&cache_state))
         .await
-        .map_err(|e| UpdateError::CacheError(CacheError::GroupingError(e)))?;
+        .map_err(|e| UpdateError::Cache(CacheError::Grouping(e)))?;
 
     Ok(alerts)
 }
@@ -244,34 +246,30 @@ async fn insert_and_update_data(alerts: &AlertsGroup, jams: &JamsGroup) -> Resul
     // Database insertions
     let alerts_inserted = alerts.bulk_insert().await.map_err(|e| {
         tracing::error!("Database Error (alerts): {:?}", e);
-        UpdateError::DatabaseError(e)
+        UpdateError::Database(e)
     })?;
 
     let j́ams_inserted = jams.bulk_insert().await.map_err(|e| {
         tracing::error!("Database Error (jams): {:?}", e);
-        UpdateError::DatabaseError(e)
+        UpdateError::Database(e)
     })?;
 
     // End pub millis update
     let alerts_ends = alerts
         .fill_end_pub_millis()
         .await
-        .map_err(UpdateError::DatabaseError)?;
+        .map_err(UpdateError::Database)?;
     let jams_ends = jams
         .fill_end_pub_millis()
         .await
-        .map_err(UpdateError::DatabaseError)?;
+        .map_err(UpdateError::Database)?;
 
     tracing::info!(
         "{} alerts and {} jams inserted to database",
         alerts_inserted,
         j́ams_inserted
     );
-    tracing::info!(
-        "{} alerts and {} jams end time updated",
-        alerts_ends,
-        jams_ends
-    );
+    tracing::info!("{} alerts and {} jams end time updated", alerts_ends, jams_ends);
 
     Ok(())
 }
@@ -292,17 +290,18 @@ async fn group_alerts(
     let alerts_grouper = match cache_state
         .client
         .get("alerts_grouper")
-        .map_err(|e| UpdateError::CacheError(CacheError::RequestError(e)))?
+        .map_err(|e| UpdateError::Cache(CacheError::Request(e)))?
     {
         Some(alerts_grouper) => alerts_grouper,
-        None => AlertsGrouper::new((10, 20))
-            .map_err(|e| UpdateError::CacheError(CacheError::GroupingError(e)))?,
+        None => {
+            AlertsGrouper::new((10, 20)).map_err(|e| UpdateError::Cache(CacheError::Grouping(e)))?
+        }
     };
 
     let alerts = alerts_grouper
         .group(alerts, Arc::clone(&cache_state))
         .await
-        .map_err(|e| UpdateError::CacheError(CacheError::GroupingError(e)))?;
+        .map_err(|e| UpdateError::Cache(CacheError::Grouping(e)))?;
 
     let prev_alerts: AlertsDataGroup = match cache_state.client.get(ALERTS_CACHE_KEY) {
         Ok(Some(prev_alerts)) => prev_alerts,
@@ -325,7 +324,7 @@ async fn group_alerts(
         cache_state
             .client
             .set(LAST_UPDATE_KEY, now, LAST_UPDATE_EXP)
-            .map_err(|e| UpdateError::CacheError(CacheError::RequestError(e)))?;
+            .map_err(|e| UpdateError::Cache(CacheError::Request(e)))?;
         tracing::info!("Set last request millis: {}", now);
     }
 
@@ -335,7 +334,7 @@ async fn group_alerts(
         .set(ALERTS_CACHE_KEY, &alerts, ALERTS_CACHE_EXP)
         .map_err(|e| {
             tracing::error!("Error setting alerts data in cache: {}", e);
-            UpdateError::CacheError(CacheError::RequestError(e))
+            UpdateError::Cache(CacheError::Request(e))
         })?;
     tracing::info!("Data inserted to cache");
 
@@ -379,9 +378,7 @@ mod tests {
         cache_state.client.delete(ALERTS_CACHE_KEY).unwrap();
 
         // Group and insert data to cache
-        let alerts = group_alerts(alerts, Arc::clone(&cache_state))
-            .await
-            .unwrap();
+        let alerts = group_alerts(alerts, Arc::clone(&cache_state)).await.unwrap();
         cache_state
             .client
             .set(ALERTS_CACHE_KEY, &alerts, ALERTS_CACHE_EXP)

@@ -46,8 +46,6 @@ use crate::utils::connect_to_db;
 /// *   19    |   Runway/Taxiway
 /// *   20    |   Parking lot road
 /// *   21    |   Service road
-
-/// Main Jam struct
 #[derive(Serialize, Deserialize, Debug, FromRow)]
 pub struct Jam {
     pub uuid: i64,
@@ -61,7 +59,8 @@ pub struct Jam {
     pub road_type: Option<i8>,
     pub delay: Option<i16>,
     pub street: Option<String>,
-    #[serde(rename = "pubMillis")]
+    #[serde(rename(serialize = "pub_millis", deserialize = "pubMillis"))]
+    #[serde(alias = "pub_millis")]
     pub pub_millis: i64,
     pub end_pub_millis: Option<i64>,
     pub segments: Option<Vec<JamSegment>>,
@@ -106,13 +105,13 @@ pub struct JamsGroup {
 
 impl JamLine {
     pub fn new(id: Option<i32>, jams_uuid: i64, position: Option<i8>, x: f64, y: f64) -> Self {
-        return JamLine {
+        JamLine {
             id,
             jams_uuid,
             position,
             x,
             y,
-        };
+        }
     }
 }
 
@@ -126,7 +125,7 @@ impl JamSegment {
         to_node: i64,
         is_forward: bool,
     ) -> Self {
-        return JamSegment {
+        JamSegment {
             id,
             jams_uuid,
             position,
@@ -134,7 +133,7 @@ impl JamSegment {
             from_node,
             to_node,
             is_forward,
-        };
+        }
     }
 }
 
@@ -178,16 +177,16 @@ impl JamsGroup {
 
         // Prepare data for insertion: jams and internal objects lines and segments
         for jam in &self.jams {
-            uuids.push(jam.uuid as i64);
+            uuids.push(jam.uuid);
             levels.push(jam.level.map(|l| l as i16));
-            speed_kmhs.push(jam.speed_kmh.map(|k| k as f32));
-            lengths.push(jam.length.map(|l| l as i16));
+            speed_kmhs.push(jam.speed_kmh);
+            lengths.push(jam.length);
             end_nodes.push(jam.end_node.clone());
             road_types.push(jam.road_type.map(|rt| rt as i16));
-            delays.push(jam.delay.map(|d| d as i16));
+            delays.push(jam.delay);
             streets.push(jam.street.clone());
-            pub_millies.push(jam.pub_millis as i64);
-            end_pub_millies.push(jam.end_pub_millis.map(|e| e as i64));
+            pub_millies.push(jam.pub_millis);
+            end_pub_millies.push(jam.end_pub_millis);
 
             // Initialize the position index at 1 equal to the original data
             if let Some(line_vec) = &jam.line {
@@ -269,7 +268,7 @@ impl JamsGroup {
         let mut uuids = Vec::with_capacity(self.jams.len());
 
         for jam in self.jams.iter() {
-            let uuid = jam.uuid as i64;
+            let uuid = jam.uuid;
             uuids.push(uuid);
         }
 

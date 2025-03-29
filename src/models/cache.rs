@@ -17,7 +17,7 @@ enum Flags {
 
 // AlertType implementation
 
-impl<'a, W: Write> ToMemcacheValue<W> for &'a AlertType {
+impl<W: Write> ToMemcacheValue<W> for &AlertType {
     fn get_flags(&self) -> u32 {
         Flags::Bytes as u32
     }
@@ -48,7 +48,7 @@ impl FromMemcacheValue for AlertType {
 
 // Alert implementation
 
-impl<'a, W: Write> ToMemcacheValue<W> for &'a Alert {
+impl<W: Write> ToMemcacheValue<W> for &Alert {
     fn get_flags(&self) -> u32 {
         Flags::Bytes as u32
     }
@@ -70,7 +70,7 @@ impl FromMemcacheValue for Alert {
 
 // AlertsGroup implementation
 
-impl<'a, W: Write> ToMemcacheValue<W> for &'a AlertsGroup {
+impl<W: Write> ToMemcacheValue<W> for &AlertsGroup {
     fn get_flags(&self) -> u32 {
         Flags::Bytes as u32
     }
@@ -94,7 +94,7 @@ impl FromMemcacheValue for AlertsGroup {
 
 // AlertsDataGroup implementation
 
-impl<'a, W: Write> ToMemcacheValue<W> for &'a AlertsDataGroup {
+impl<W: Write> ToMemcacheValue<W> for &AlertsDataGroup {
     fn get_flags(&self) -> u32 {
         Flags::Bytes as u32
     }
@@ -125,7 +125,7 @@ impl FromMemcacheValue for AlertsGrouper {
     }
 }
 
-impl<'a, W: Write> ToMemcacheValue<W> for &'a AlertsGrouper {
+impl<W: Write> ToMemcacheValue<W> for &AlertsGrouper {
     fn get_flags(&self) -> u32 {
         Flags::Bytes as u32
     }
