@@ -1,5 +1,5 @@
 use antof_traffic::server::{init_cache, create_server};
-use antof_traffic::data::{LAST_UPDATE_KEY, ALERTS_CACHE_KEY};
+use antof_traffic::data::{MIN_PUB_MILLIS, ALERTS_CACHE_KEY};
 use tokio::task::JoinHandle;
 use chrono::Utc;
 use serial_test::serial;
@@ -56,7 +56,7 @@ async fn test_integrity() {
 
     // Clear cache before test
     cache.delete(ALERTS_CACHE_KEY).unwrap();
-    cache.delete(LAST_UPDATE_KEY).unwrap();
+    cache.delete(MIN_PUB_MILLIS).unwrap();
 
     // If the request is after the last update
     // returns all data from cache
@@ -85,7 +85,7 @@ async fn test_old_data() {
 
     // Clear cache before test
     cache.delete(ALERTS_CACHE_KEY).unwrap();
-    cache.delete(LAST_UPDATE_KEY).unwrap();
+    cache.delete(MIN_PUB_MILLIS).unwrap();
 
     // Get old data that don't exist in cache
     // 120 days ago

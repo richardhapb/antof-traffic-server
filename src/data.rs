@@ -8,9 +8,9 @@ use crate::models::{
 use crate::server::CacheState;
 use crate::utils::connect_to_db;
 
-use chrono::Utc;
 use std::sync::Arc;
 
+use chrono::Utc;
 use serde::Deserialize;
 
 use axum::{
@@ -20,12 +20,15 @@ use axum::{
 use memcache::{CommandError, MemcacheError};
 
 pub const ALERTS_CACHE_KEY: &str = "alerts_data";
-const ALERTS_CACHE_EXP: u32 = 3600; // 1 hour
+const ALERTS_CACHE_EXP: u32 = 604800; // One week
 
-pub const LAST_UPDATE_KEY: &str = "last_request_millis";
-const LAST_UPDATE_EXP: u32 = 3600; // 1 hour
+pub const MIN_PUB_MILLIS: &str = "min_pub_millis";
+pub const MAX_PUB_MILLIS: &str = "max_pub_millis";
 
 const ALERTS_BEGIN_TIMESTAMP: i64 = 1727740800000;
+
+// Threshold between last update and until param in request
+const UPDATE_UNTIL_THRESHOLD: i64 = 600000; // 10 minutes
 
 // AXUM HANDLERS
 
@@ -82,21 +85,33 @@ pub async fn get_data(
     tracing::info!("Retrieving last request millis");
     let min_millis = cache_state
         .client
-        .get::<i64>(LAST_UPDATE_KEY)
+        .get::<i64>(MIN_PUB_MILLIS)
         .map_err(|_| {
             UpdateError::Cache(CacheError::Request(MemcacheError::CommandError(
                 CommandError::KeyNotFound,
             )))
         })?
         .unwrap_or(-1);
-    tracing::info!("Last request millis: {}", min_millis);
 
-    // If the request `since` argument is upper than `LAST_UPDATE_KEY`,
-    // we send data from cache if it is present. Otherwise send data from database.
+    let max_millis = cache_state
+        .client
+        .get::<i64>(MAX_PUB_MILLIS)
+        .map_err(|_| {
+            UpdateError::Cache(CacheError::Request(MemcacheError::CommandError(
+                CommandError::KeyNotFound,
+            )))
+        })?
+        .unwrap_or(-1);
+
+    tracing::info!("Retrieving data from cache with params");
+    tracing::info!("min pub_millis: {}", min_millis);
+    tracing::info!("max pub_millis: {}", max_millis);
+
+    // If the data from cache is larger than the data requested, return the cache
     match &params.since {
         // Only retrieve from cache if since is present
         Some(since) => {
-            if min_millis > 0 && min_millis <= *since {
+            if min_millis > 0 && min_millis <= *since && max_millis >= params.until.unwrap_or(-2) - UPDATE_UNTIL_THRESHOLD {
                 // Try to get data from cache
                 alerts = match get_data_from_cache(&cache_state.client).await {
                     Ok(alerts) => Some(alerts),
@@ -106,10 +121,12 @@ pub async fn get_data(
                         None
                     }
                 };
-            }
-        }
+            }        }
         None => {}
     };
+
+    // Calculate params
+    let params = calculate_params(min_millis, max_millis, params);
 
     // If alerts is `None` retrieve data from database.
     let alerts = match alerts {
@@ -117,36 +134,62 @@ pub async fn get_data(
         None => get_data_from_database(params, Arc::clone(&cache_state)).await?,
     };
 
-    // Clear alerts from cache to avoid sending repeated data
-    clear_alerts_cache(cache_state)?;
-
     Ok(Json(alerts))
 }
 
-/// Clear the pub millis reference to last update from API and alerts from cache
+/// Calculate the min and max pub_millis from params and match since/until
+/// to the max or min pub_millis, if params.since and params.until are larger
+/// than the cache, returns `params_since` and `params_until`
 ///
-/// # Params
-/// * `cache_state`: Reference to cache state
-/// 
-/// # Returns
-/// * `UpdateError` if the data cannot be deleted
-fn clear_alerts_cache(cache_state: Arc<CacheState>) -> Result<(), UpdateError> {
+/// # Example
+/// ```
+/// use antof_traffic::data::FilterParams;
+/// use antof_traffic::data::calculate_params;
+///
+/// let since = 10000;
+/// let until = 20000;
+/// let params = FilterParams { since: Some(5000), until: Some(15000)};
+///
+/// let result = calculate_params(since, until, params);
+/// assert_eq!(result.since.unwrap(), 5000);
+/// assert_eq!(result.until.unwrap(), since); // Until the initial `since`
+///
+/// let since = 10000;
+/// let until = 20000;
+/// let params = FilterParams { since: Some(15000), until: Some(25000)};
+///
+/// let result = calculate_params(since, until, params);
+/// assert_eq!(result.since.unwrap(), until); // Since the initial `until`
+/// assert_eq!(result.until.unwrap(), 25000);
+///
+/// let since = 10000;
+/// let until = 20000;
+/// let params = FilterParams { since: Some(5000), until: Some(25000)};
+///
+/// let result = calculate_params(since, until, params);
+/// // The range is larger than the initial params
+/// assert_eq!(result.since.unwrap(), 5000);
+/// assert_eq!(result.until.unwrap(), 25000);
+/// ```
+pub fn calculate_params(min_millis: i64, max_millis: i64, params: FilterParams) -> FilterParams {
+    let params_since = params.since.unwrap_or(min_millis);
+    let params_until = params.until.unwrap_or(max_millis);
 
-    // Clear data for avoid send again same data
-    cache_state.client.delete(ALERTS_CACHE_KEY).map_err(|_| {
-        UpdateError::Cache(CacheError::Request(MemcacheError::CommandError(
-            CommandError::KeyNotFound,
-        )))
-    })?;
+    let mut since = std::cmp::min(min_millis, params_since);
+    let mut until = std::cmp::max(max_millis, params_until);
 
-    // Clear last register, this indicates that there is not new data in cache
-    cache_state.client.delete(LAST_UPDATE_KEY).map_err(|_| {
-        UpdateError::Cache(CacheError::Request(MemcacheError::CommandError(
-            CommandError::KeyNotFound,
-        )))
-    })?;
+    // Only retrieve the least amount of data
+    if since < min_millis && until <= max_millis {
+        until = min_millis
+    } else if since >= min_millis && until > max_millis {
+        since = max_millis
+    }
 
-    Ok(())
+    FilterParams {
+        since: Some(since),
+        until: Some(until)
+    }
+
 }
 
 /// Retrieve data from cache if it exists
@@ -224,15 +267,32 @@ pub async fn get_data_from_database(
         .map_err(|e| UpdateError::Cache(CacheError::Request(e)))?
     {
         Some(alerts_grouper) => alerts_grouper,
-        None => {
-            AlertsGrouper::new((10, 20)).map_err(|e| UpdateError::Cache(CacheError::Grouping(e)))?
-        }
+        None => AlertsGrouper::new((10, 20)).map_err(|e| UpdateError::Cache(CacheError::Grouping(e)))?,
     };
 
     let alerts = alerts_grouper
         .group(alerts, Arc::clone(&cache_state))
         .await
         .map_err(|e| UpdateError::Cache(CacheError::Grouping(e)))?;
+
+    // Set the minimum `since` query to the cache
+    cache_state
+        .client
+        .set(MIN_PUB_MILLIS, since, ALERTS_CACHE_EXP)
+        .map_err(|e| UpdateError::Cache(CacheError::Request(e)))?;
+    tracing::info!("Set min pub_millis: {}", since);
+
+    let until = filters.until.unwrap_or_else(|| Utc::now().timestamp());
+
+    // Set the maximum `until` query to the cache if it exists
+    cache_state
+        .client
+        .set(MAX_PUB_MILLIS, until, ALERTS_CACHE_EXP)
+        .map_err(|e| UpdateError::Cache(CacheError::Request(e)))?;
+    tracing::info!("Set max pub_millis: {}", until);
+
+    // Get the alerts from the cache and concatenate with new data
+    let alerts = concat_alerts_and_storage_to_cache(cache_state, alerts)?;
 
     Ok(alerts)
 }
@@ -259,10 +319,7 @@ async fn insert_and_update_data(alerts: &AlertsGroup, jams: &JamsGroup) -> Resul
         .fill_end_pub_millis()
         .await
         .map_err(UpdateError::Database)?;
-    let jams_ends = jams
-        .fill_end_pub_millis()
-        .await
-        .map_err(UpdateError::Database)?;
+    let jams_ends = jams.fill_end_pub_millis().await.map_err(UpdateError::Database)?;
 
     tracing::info!(
         "{} alerts and {} jams inserted to database",
@@ -293,9 +350,7 @@ async fn group_alerts(
         .map_err(|e| UpdateError::Cache(CacheError::Request(e)))?
     {
         Some(alerts_grouper) => alerts_grouper,
-        None => {
-            AlertsGrouper::new((10, 20)).map_err(|e| UpdateError::Cache(CacheError::Grouping(e)))?
-        }
+        None => AlertsGrouper::new((10, 20)).map_err(|e| UpdateError::Cache(CacheError::Grouping(e)))?,
     };
 
     let alerts = alerts_grouper
@@ -303,6 +358,24 @@ async fn group_alerts(
         .await
         .map_err(|e| UpdateError::Cache(CacheError::Grouping(e)))?;
 
+    // Update data in cache and concatenate
+    let alerts = concat_alerts_and_storage_to_cache(cache_state, alerts)?;
+
+    Ok(alerts)
+}
+
+/// Concatenate alerts with cache data and update the cache with the result
+///
+/// # Parameters
+/// * `cache_state`: Pointer to the cache state
+/// * `alerts`: New alerts to concatenate
+///
+/// # Returns
+/// * The concatenated alerts.
+fn concat_alerts_and_storage_to_cache(
+    cache_state: Arc<CacheState>,
+    alerts: AlertsDataGroup,
+) -> Result<AlertsDataGroup, UpdateError> {
     let prev_alerts: AlertsDataGroup = match cache_state.client.get(ALERTS_CACHE_KEY) {
         Ok(Some(prev_alerts)) => prev_alerts,
         Ok(None) => AlertsDataGroup { alerts: vec![] },
@@ -311,22 +384,6 @@ async fn group_alerts(
 
     // Concat to previuos alerts in cache
     let alerts = prev_alerts.concat(alerts);
-
-    // Only set the cache if it not exists
-    // because this is reset if the client request the data
-    if cache_state
-        .client
-        .get::<i64>(LAST_UPDATE_KEY)
-        .unwrap_or(None)
-        .is_none()
-    {
-        let now = Utc::now().timestamp() * 1000;
-        cache_state
-            .client
-            .set(LAST_UPDATE_KEY, now, LAST_UPDATE_EXP)
-            .map_err(|e| UpdateError::Cache(CacheError::Request(e)))?;
-        tracing::info!("Set last request millis: {}", now);
-    }
 
     tracing::info!("Setting data of alerts in cache");
     cache_state
