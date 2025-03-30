@@ -90,7 +90,10 @@ pub async fn get_data(
     let mut alerts: Option<_> = None;
 
     let now = Utc::now().timestamp() * 1000;
-    let since = max(ALERTS_BEGIN_TIMESTAMP, params.since.unwrap_or(ALERTS_BEGIN_TIMESTAMP));
+    let since = max(
+        ALERTS_BEGIN_TIMESTAMP,
+        params.since.unwrap_or(ALERTS_BEGIN_TIMESTAMP),
+    );
     let until = min(now, params.until.unwrap_or(now));
 
     let min_millis = cache_state
@@ -131,9 +134,6 @@ pub async fn get_data(
         };
     }
 
-    // Calculate params
-    let params = calculate_params(min_millis, max_millis, params);
-
     // If alerts is `None` retrieve data from database.
     let alerts = match alerts {
         Some(a) => a,
@@ -170,7 +170,7 @@ pub async fn get_data(
 /// let until = 20000;
 /// let params = FilterParams { since: Some(5000), until: Some(15000)};
 ///
-/// let result = calculate_params(since, until, params);
+/// let result = calculate_params(since, until, &params);
 /// assert_eq!(result.since.unwrap(), 5000);
 /// assert_eq!(result.until.unwrap(), since); // Until the initial `since`
 ///
@@ -178,7 +178,7 @@ pub async fn get_data(
 /// let until = 20000;
 /// let params = FilterParams { since: Some(15000), until: Some(25000)};
 ///
-/// let result = calculate_params(since, until, params);
+/// let result = calculate_params(since, until, &params);
 /// assert_eq!(result.since.unwrap(), until); // Since the initial `until`
 /// assert_eq!(result.until.unwrap(), 25000);
 ///
@@ -186,12 +186,12 @@ pub async fn get_data(
 /// let until = 20000;
 /// let params = FilterParams { since: Some(5000), until: Some(25000)};
 ///
-/// let result = calculate_params(since, until, params);
+/// let result = calculate_params(since, until, &params);
 /// // The range is larger than the initial params
 /// assert_eq!(result.since.unwrap(), 5000);
 /// assert_eq!(result.until.unwrap(), 25000);
 /// ```
-pub fn calculate_params(min_millis: i64, max_millis: i64, params: FilterParams) -> FilterParams {
+pub fn calculate_params(min_millis: i64, max_millis: i64, params: &FilterParams) -> FilterParams {
     let params_since = params.since.unwrap_or(min_millis);
     let params_until = params.until.unwrap_or(max_millis);
 
@@ -265,8 +265,36 @@ pub async fn get_data_from_database(
     let pool = connect_to_db().await.map_err(UpdateError::Database)?;
 
     let now = Utc::now().timestamp() * 1000;
-    let since = max(ALERTS_BEGIN_TIMESTAMP, params.since.unwrap_or(ALERTS_BEGIN_TIMESTAMP));
+    let since = max(
+        ALERTS_BEGIN_TIMESTAMP,
+        params.since.unwrap_or(ALERTS_BEGIN_TIMESTAMP),
+    );
     let until = min(now, params.until.unwrap_or(now));
+
+    let min_millis =cache_state
+        .client
+        .get::<i64>(MIN_PUB_MILLIS)
+        .map_err(|_| {
+            UpdateError::Cache(CacheError::Request(MemcacheError::CommandError(
+                CommandError::KeyNotFound,
+            )))
+        })?
+        .unwrap_or(since);
+
+    let max_millis = cache_state.
+        client
+        .get::<i64>(MAX_PUB_MILLIS)
+        .map_err(|_| {
+            UpdateError::Cache(CacheError::Request(MemcacheError::CommandError(
+                CommandError::KeyNotFound,
+            )))
+        })?
+        .unwrap_or(until);
+
+    // Calculate params
+    let params = calculate_params(min_millis, max_millis, params);
+    tracing::info!("Params calculated: {:?}", params);
+
 
     let query = format!(
         r#"
