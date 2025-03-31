@@ -9,8 +9,8 @@ use chrono::{DateTime, Datelike, Local, TimeZone, Timelike, Utc};
 use chrono_tz::America::Santiago;
 
 use crate::errors::EventError;
-use crate::server::CacheState;
 use crate::utils::connect_to_db;
+use crate::cache::CacheService;
 
 type FutureError = Box<dyn StdError + Send + Sync + 'static>;
 
@@ -465,11 +465,11 @@ impl AlertsGrouper {
     pub async fn group(
         &self,
         alerts: AlertsGroup,
-        cache_state: Arc<CacheState>,
+        cache_service: Arc<CacheService>,
     ) -> Result<AlertsDataGroup, Box<dyn std::error::Error + Send + Sync>> {
         let mut alerts_data: AlertsDataGroup = AlertsDataGroup { alerts: vec![] };
 
-        let holidays = get_holidays(cache_state).await.unwrap_or(Holidays {
+        let holidays = get_holidays(cache_service).await.unwrap_or(Holidays {
             status: Some("Error".to_string()),
             data: vec![],
         });
@@ -606,12 +606,12 @@ const HD_PATH: &str = "data/holidays.json";
 /// Get the holidays from cache, the backup file or in last instance from API
 ///
 /// # Params
-/// * cache_state: Global cache state with connection to cache provider
+/// * cache_service: Global cache state with connection to cache provider
 ///
 /// # Returns
 /// * Result enum with Holidays or an error
-pub async fn get_holidays(cache_state: Arc<CacheState>) -> Result<Holidays, FutureError> {
-    if let Ok(Some(cached_bytes)) = cache_state.client.get::<Vec<u8>>(HD_CACHE_KEY) {
+pub async fn get_holidays(cache_service: Arc<CacheService>) -> Result<Holidays, FutureError> {
+    if let Ok(Some(cached_bytes)) = cache_service.client.get::<Vec<u8>>(HD_CACHE_KEY) {
         let cached_data: Holidays = serde_json::from_slice(&cached_bytes)?;
 
         return Ok(cached_data);
@@ -632,12 +632,12 @@ pub async fn get_holidays(cache_state: Arc<CacheState>) -> Result<Holidays, Futu
 
             // Trigger async update in background
             // once a month (when cache expires)
-            let cache_state_clone = Arc::clone(&cache_state);
+            let cache_service_clone = Arc::clone(&cache_service);
 
             // Trigger async update in background
             tracing::info!("Throwing background holidays update");
             tokio::spawn(async move {
-                if let Err(e) = update_holidays(&cache_state_clone).await {
+                if let Err(e) = update_holidays(&cache_service_clone).await {
                     tracing::error!("Background update failed: {}", e);
                 }
             });
@@ -650,7 +650,7 @@ pub async fn get_holidays(cache_state: Arc<CacheState>) -> Result<Holidays, Futu
             let holidays = tokio::task::spawn_blocking(move || {
                 // Create a dedicated runtime on the blocking thread
                 let rt = tokio::runtime::Runtime::new().map_err(|e| Box::new(e) as FutureError)?;
-                rt.block_on(update_holidays(&Arc::clone(&cache_state)))
+                rt.block_on(update_holidays(&Arc::clone(&cache_service)))
             })
             .await??;
             Ok(holidays)
@@ -661,11 +661,11 @@ pub async fn get_holidays(cache_state: Arc<CacheState>) -> Result<Holidays, Futu
 /// Update cache and file with API response
 ///
 /// # Params
-/// * cache_state: Global cache state with connection to cache provider
+/// * cache_service: Global cache state with connection to cache provider
 ///
 /// # Returns
 /// * Result enum with Holidays or an error
-async fn update_holidays(cache_state: &Arc<CacheState>) -> Result<Holidays, Box<dyn Error + Send + Sync>> {
+async fn update_holidays(cache_service: &Arc<CacheService>) -> Result<Holidays, Box<dyn Error + Send + Sync>> {
     let holidays_api: String = env::var("HOLIDAYS_API")?;
 
     let current_year = Local::now().year();
@@ -693,7 +693,7 @@ async fn update_holidays(cache_state: &Arc<CacheState>) -> Result<Holidays, Box<
     let json_bytes = serde_json::to_vec(&holidays)?;
 
     // Update cache
-    cache_state
+    cache_service
         .client
         .set(HD_CACHE_KEY, &json_bytes[..], HD_CACHE_EXPIRY)?;
 
@@ -862,12 +862,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_alerts_group() {
-        let cache_state = setup_cache().await;
+        let cache_service = setup_cache().await;
         let alerts_grouper = AlertsGrouper::new((10, 20)).unwrap();
         let alerts_group = setup_alerts();
 
         // Update holidays from API
-        let grouped_alerts = alerts_grouper.group(alerts_group, cache_state).await.unwrap();
+        let grouped_alerts = alerts_grouper.group(alerts_group, cache_service).await.unwrap();
         let alert = grouped_alerts.alerts.first().unwrap();
 
         // 2025-01-15 is a workday and group for the location is 82
@@ -922,10 +922,10 @@ mod tests {
     #[tokio::test]
     async fn test_update_holidays() {
         setup_test_env();
-        let cache_state = setup_cache().await;
+        let cache_service = setup_cache().await;
 
         // Update holidays from API
-        let result = update_holidays(&Arc::clone(&cache_state)).await;
+        let result = update_holidays(&Arc::clone(&cache_service)).await;
 
         // Assert we get an Ok result containing Holidays
         // and time in localtime (America/Santiago)
@@ -941,10 +941,10 @@ mod tests {
     #[tokio::test]
     async fn test_get_holidays() {
         setup_test_env();
-        let cache_state = setup_cache().await;
+        let cache_service = setup_cache().await;
 
         // Get holidays
-        let result = get_holidays(Arc::clone(&cache_state)).await;
+        let result = get_holidays(Arc::clone(&cache_service)).await;
 
         match result {
             Ok(holidays) => {

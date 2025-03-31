@@ -2,8 +2,9 @@ use antof_traffic::api::request_waze_data;
 use antof_traffic::data::{
     ALERTS_CACHE_KEY, MIN_PUB_MILLIS, concat_alerts_and_storage_to_cache, group_alerts,
 };
+use antof_traffic::cache::CacheService;
 use antof_traffic::models::alerts::{AlertsDataGroup, AlertsGroup};
-use antof_traffic::server::{create_server, init_cache};
+use antof_traffic::server::create_server;
 use chrono::Utc;
 use serial_test::serial;
 use tokio::task::JoinHandle;
@@ -53,7 +54,7 @@ async fn test_get_data() {
 #[tokio::test]
 #[serial]
 async fn test_integrity() {
-    let cache = init_cache().await;
+    let cache = CacheService::init_cache().await;
     let handler = start_http_server();
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -90,7 +91,7 @@ async fn test_integrity() {
 #[tokio::test]
 #[serial]
 async fn test_old_data() {
-    let cache = init_cache().await.client.clone();
+    let cache = CacheService::init_cache().await.client.clone();
     let handler = start_http_server();
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;

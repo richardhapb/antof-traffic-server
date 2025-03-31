@@ -52,16 +52,16 @@ pub mod test {
 
     use std::sync::Arc;
 
-    use crate::server::{CacheState, init_cache};
+    use crate::cache::CacheService;
 
-    static CACHE: tokio::sync::OnceCell<Arc<CacheState>> = tokio::sync::OnceCell::const_new();
+    static CACHE: tokio::sync::OnceCell<Arc<CacheService>> = tokio::sync::OnceCell::const_new();
 
     // Get the cache connection instance
-    pub async fn setup_cache() -> Arc<CacheState> {
+    pub async fn setup_cache() -> Arc<CacheService> {
         CACHE
             .get_or_init(|| async {
                 // Initialize test cache
-                init_cache().await
+                CacheService::init_cache().await
             })
             .await
             .clone()
