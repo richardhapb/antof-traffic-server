@@ -17,7 +17,6 @@ use axum::{
     Json,
     extract::{Query, State},
 };
-use memcache::{CommandError, MemcacheError};
 
 pub const ALERTS_CACHE_KEY: &str = "alerts_data";
 pub const ALERTS_CACHE_EXP: u32 = 604800; // One week
@@ -95,25 +94,8 @@ pub async fn get_data(
     );
     let until = min(now, params.until.unwrap_or(now));
 
-    let min_millis = cache_service
-        .client
-        .get::<i64>(MIN_PUB_MILLIS)
-        .map_err(|_| {
-            UpdateError::Cache(CacheError::Request(MemcacheError::CommandError(
-                CommandError::KeyNotFound,
-            )))
-        })?
-        .unwrap_or(since);
-
-    let max_millis = cache_service
-        .client
-        .get::<i64>(MAX_PUB_MILLIS)
-        .map_err(|_| {
-            UpdateError::Cache(CacheError::Request(MemcacheError::CommandError(
-                CommandError::KeyNotFound,
-            )))
-        })?
-        .unwrap_or(until);
+    let min_millis = cache_service.get_or_default(MIN_PUB_MILLIS, since);
+    let max_millis = cache_service.get_or_default(MAX_PUB_MILLIS, until);
 
     tracing::info!("Retrieving data from cache with params");
     tracing::info!("min pub_millis: {}", min_millis);
@@ -256,25 +238,8 @@ pub async fn get_data_from_database(
     );
     let until = min(now, params.until.unwrap_or(now));
 
-    let min_millis = cache_service
-        .client
-        .get::<i64>(MIN_PUB_MILLIS)
-        .map_err(|_| {
-            UpdateError::Cache(CacheError::Request(MemcacheError::CommandError(
-                CommandError::KeyNotFound,
-            )))
-        })?
-        .unwrap_or(since);
-
-    let max_millis = cache_service
-        .client
-        .get::<i64>(MAX_PUB_MILLIS)
-        .map_err(|_| {
-            UpdateError::Cache(CacheError::Request(MemcacheError::CommandError(
-                CommandError::KeyNotFound,
-            )))
-        })?
-        .unwrap_or(until);
+    let min_millis = cache_service.get_or_default(MIN_PUB_MILLIS, since);
+    let max_millis = cache_service.get_or_default(MAX_PUB_MILLIS, until);
 
     // Calculate params
     let params = calculate_params(min_millis, max_millis, params);
@@ -417,7 +382,9 @@ pub fn concat_alerts_and_storage_to_cache(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::errors::CacheError;
     use crate::utils::test::{setup_alerts, setup_cache, setup_test_db};
+    use memcache::{CommandError, MemcacheError};
     use serial_test::serial;
 
     #[tokio::test]
@@ -441,7 +408,7 @@ mod tests {
         assert!(matches!(
             result,
             Err(CacheError::NotFound(MemcacheError::CommandError(
-                CommandError::InvalidArguments,
+                CommandError::KeyNotFound,
             )))
         ))
     }
