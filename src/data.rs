@@ -2,10 +2,10 @@ use crate::api;
 use crate::cache::CacheService;
 use crate::errors::{CacheError, UpdateError};
 use crate::models::{
-    alerts::{AlertsDataGroup, AlertsGroup, AlertsGrouper},
+    alerts::{AlertsDataGroup, AlertsGroup},
     jams::JamsGroup,
 };
-use crate::utils::connect_to_db;
+use crate::utils::{calculate_params, connect_to_db, group_alerts};
 
 use std::cmp::{max, min};
 use std::sync::Arc;
@@ -21,9 +21,6 @@ use axum::{
 pub const ALERTS_CACHE_KEY: &str = "alerts_data";
 pub const ALERTS_CACHE_EXP: u32 = 604800; // One week
 
-const ALERTS_GROUPER_CACHE_KEY: &str = "alerts_grouper";
-const ALERTS_GROUPER_CACHE_EXP: u32 = 604800; // One week 
-
 pub const MIN_PUB_MILLIS: &str = "min_pub_millis";
 pub const MAX_PUB_MILLIS: &str = "max_pub_millis";
 
@@ -31,6 +28,23 @@ const ALERTS_BEGIN_TIMESTAMP: i64 = 1727740800000; // 2024-10-01
 
 // Threshold between last update and until param in request
 const UPDATE_UNTIL_THRESHOLD: i64 = 600000; // 10 minutes
+
+/// Get the range of the [`FilterParams`] and return
+/// `since` and `until` with the correct values
+///
+/// The return value must be between `ALERTS_BEGIN_TIMESTAMP`
+/// and the current time, inclusively.
+macro_rules! get_time_range {
+    ($params:expr) => {{
+        let now = Utc::now().timestamp() * 1000;
+        let since = max(
+            ALERTS_BEGIN_TIMESTAMP,
+            $params.since.unwrap_or(ALERTS_BEGIN_TIMESTAMP),
+        );
+        let until = min(now, $params.until.unwrap_or(now));
+        (since, until)
+    }};
+}
 
 // AXUM HANDLERS
 
@@ -87,12 +101,7 @@ pub async fn get_data(
     tracing::info!("Params received: {:?}", params);
     let mut alerts: Option<_> = None;
 
-    let now = Utc::now().timestamp() * 1000;
-    let since = max(
-        ALERTS_BEGIN_TIMESTAMP,
-        params.since.unwrap_or(ALERTS_BEGIN_TIMESTAMP),
-    );
-    let until = min(now, params.until.unwrap_or(now));
+    let (since, until) = get_time_range!(params);
 
     let min_millis = cache_service.get_or_default(MIN_PUB_MILLIS, since);
     let max_millis = cache_service.get_or_default(MAX_PUB_MILLIS, until);
@@ -132,61 +141,6 @@ pub async fn get_data(
     Ok(Json(alerts))
 }
 
-/// Calculate the min and max pub_millis from params and match since/until
-/// to the max or min pub_millis, if params.since and params.until are larger
-/// than the cache, returns `params_since` and `params_until`
-///
-/// # Example
-/// ```
-/// use antof_traffic::data::FilterParams;
-/// use antof_traffic::data::calculate_params;
-///
-/// let since = 10000;
-/// let until = 20000;
-/// let params = FilterParams { since: Some(5000), until: Some(15000)};
-///
-/// let result = calculate_params(since, until, &params);
-/// assert_eq!(result.since.unwrap(), 5000);
-/// assert_eq!(result.until.unwrap(), since); // Until the initial `since`
-///
-/// let since = 10000;
-/// let until = 20000;
-/// let params = FilterParams { since: Some(15000), until: Some(25000)};
-///
-/// let result = calculate_params(since, until, &params);
-/// assert_eq!(result.since.unwrap(), until); // Since the initial `until`
-/// assert_eq!(result.until.unwrap(), 25000);
-///
-/// let since = 10000;
-/// let until = 20000;
-/// let params = FilterParams { since: Some(5000), until: Some(25000)};
-///
-/// let result = calculate_params(since, until, &params);
-/// // The range is larger than the initial params
-/// assert_eq!(result.since.unwrap(), 5000);
-/// assert_eq!(result.until.unwrap(), 25000);
-/// ```
-pub fn calculate_params(min_millis: i64, max_millis: i64, params: &FilterParams) -> FilterParams {
-    let params_since = params.since.unwrap_or(min_millis);
-    let params_until = params.until.unwrap_or(max_millis);
-
-    // Get the edge of requested data
-    let mut since = min(min_millis, params_since);
-    let mut until = max(max_millis, params_until);
-
-    // Only retrieve the least amount of data
-    if since < min_millis && until <= max_millis {
-        until = min_millis
-    } else if since >= min_millis && until > max_millis {
-        since = max_millis
-    }
-
-    FilterParams {
-        since: Some(since),
-        until: Some(until),
-    }
-}
-
 /// Retrieve data from cache if it exists
 ///
 /// # Params
@@ -201,12 +155,7 @@ pub async fn get_data_from_cache(
 ) -> Result<AlertsDataGroup, CacheError> {
     tracing::info!("Retrieving data...");
 
-    let now = Utc::now().timestamp() * 1000;
-    let since = max(
-        ALERTS_BEGIN_TIMESTAMP,
-        params.since.unwrap_or(ALERTS_BEGIN_TIMESTAMP),
-    );
-    let until = min(now, params.until.unwrap_or(now));
+    let (since, until) = get_time_range!(params);
 
     let mut alerts: AlertsDataGroup = cache_service.get_or_cache_err(ALERTS_CACHE_KEY)?;
 
@@ -231,12 +180,7 @@ pub async fn get_data_from_database(
     tracing::info!("Retrieving data from database...");
     let pool = connect_to_db().await.map_err(UpdateError::Database)?;
 
-    let now = Utc::now().timestamp() * 1000;
-    let since = max(
-        ALERTS_BEGIN_TIMESTAMP,
-        params.since.unwrap_or(ALERTS_BEGIN_TIMESTAMP),
-    );
-    let until = min(now, params.until.unwrap_or(now));
+    let (since, until) = get_time_range!(params);
 
     let min_millis = cache_service.get_or_default(MIN_PUB_MILLIS, since);
     let max_millis = cache_service.get_or_default(MAX_PUB_MILLIS, until);
@@ -309,49 +253,6 @@ async fn insert_and_update_data(alerts: &AlertsGroup, jams: &JamsGroup) -> Resul
     tracing::info!("{} alerts and {} jams end time updated", alerts_ends, jams_ends);
 
     Ok(())
-}
-
-/// Group the alerts and generate aggregate data, try get grouper from cache
-///
-/// # Params
-/// * alerts: Alerts to group
-/// * cache_service: Global state with cache connection
-///
-/// # Returns
-/// * Result with new [`AlertsDataGroup`] or an [`UpdateError`]
-pub async fn group_alerts(
-    alerts: AlertsGroup,
-    cache_service: Arc<CacheService>,
-) -> Result<AlertsDataGroup, UpdateError> {
-    // Group data, try get from cache the grouper
-    let alerts_grouper = match cache_service
-        .client
-        .get(ALERTS_GROUPER_CACHE_KEY)
-        .map_err(|e| UpdateError::Cache(CacheError::Request(e)))?
-    {
-        Some(alerts_grouper) => alerts_grouper,
-        None => {
-            let alerts_grouper =
-                AlertsGrouper::new((10, 20)).map_err(|e| UpdateError::Cache(CacheError::Grouping(e)))?;
-            cache_service
-                .client
-                .set(
-                    ALERTS_GROUPER_CACHE_KEY,
-                    &alerts_grouper,
-                    ALERTS_GROUPER_CACHE_EXP,
-                )
-                .map_err(|e| UpdateError::Cache(CacheError::Request(e)))?;
-
-            alerts_grouper
-        }
-    };
-
-    let alerts = alerts_grouper
-        .group(alerts, Arc::clone(&cache_service))
-        .await
-        .map_err(|e| UpdateError::Cache(CacheError::Grouping(e)))?;
-
-    Ok(alerts)
 }
 
 /// Concatenate alerts with cache data and update the cache with the result
@@ -488,5 +389,32 @@ mod tests {
 
         // Should return both alerts
         assert_eq!(alerts.alerts.len(), 2);
+    }
+
+    #[test]
+    fn test_time_range_macro() {
+        let now = Utc::now().timestamp() * 1000;
+        let params = FilterParams {
+            since: Some(ALERTS_BEGIN_TIMESTAMP - 20),
+            until: Some(now + 100),
+        };
+        let (since, until) = get_time_range!(params);
+
+        // `since` can't be lower than `ALERTS_BEGIN_TIMESTAMP`
+        assert_eq!(since, ALERTS_BEGIN_TIMESTAMP);
+        // `until` can't be upper than current time
+        assert_eq!(until, now);
+
+        // Second case
+
+        let params = FilterParams {
+            since: Some(ALERTS_BEGIN_TIMESTAMP + 20),
+            until: Some(now - 100),
+        };
+
+        let (since, until) = get_time_range!(params);
+
+        assert_eq!(since, ALERTS_BEGIN_TIMESTAMP + 20);
+        assert_eq!(until, now - 100);
     }
 }

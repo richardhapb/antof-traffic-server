@@ -1,10 +1,9 @@
 use antof_traffic::api::request_waze_data;
-use antof_traffic::data::{
-    ALERTS_CACHE_KEY, MIN_PUB_MILLIS, concat_alerts_and_storage_to_cache, group_alerts,
-};
 use antof_traffic::cache::CacheService;
+use antof_traffic::data::{ALERTS_CACHE_KEY, MIN_PUB_MILLIS, concat_alerts_and_storage_to_cache};
 use antof_traffic::models::alerts::{AlertsDataGroup, AlertsGroup};
 use antof_traffic::server::create_server;
+use antof_traffic::utils::group_alerts;
 use chrono::Utc;
 use serial_test::serial;
 use tokio::task::JoinHandle;

@@ -1,3 +1,111 @@
+use crate::cache::CacheService;
+use crate::data::FilterParams;
+use crate::errors::{CacheError, UpdateError};
+use crate::models::alerts::{AlertsDataGroup, AlertsGroup, AlertsGrouper};
+use std::cmp::{max, min};
+use std::sync::Arc;
+
+const ALERTS_GROUPER_CACHE_KEY: &str = "alerts_grouper";
+const ALERTS_GROUPER_CACHE_EXP: u32 = 604800; // One week 
+
+/// Calculate the min and max pub_millis from params and match since/until
+/// to the max or min pub_millis, if params.since and params.until are larger
+/// than the cache, returns `params_since` and `params_until`
+///
+/// # Example
+/// ```
+/// use antof_traffic::data::FilterParams;
+/// use antof_traffic::data::calculate_params;
+///
+/// let since = 10000;
+/// let until = 20000;
+/// let params = FilterParams { since: Some(5000), until: Some(15000)};
+///
+/// let result = calculate_params(since, until, &params);
+/// assert_eq!(result.since.unwrap(), 5000);
+/// assert_eq!(result.until.unwrap(), since); // Until the initial `since`
+///
+/// let since = 10000;
+/// let until = 20000;
+/// let params = FilterParams { since: Some(15000), until: Some(25000)};
+///
+/// let result = calculate_params(since, until, &params);
+/// assert_eq!(result.since.unwrap(), until); // Since the initial `until`
+/// assert_eq!(result.until.unwrap(), 25000);
+///
+/// let since = 10000;
+/// let until = 20000;
+/// let params = FilterParams { since: Some(5000), until: Some(25000)};
+///
+/// let result = calculate_params(since, until, &params);
+/// // The range is larger than the initial params
+/// assert_eq!(result.since.unwrap(), 5000);
+/// assert_eq!(result.until.unwrap(), 25000);
+/// ```
+pub fn calculate_params(min_millis: i64, max_millis: i64, params: &FilterParams) -> FilterParams {
+    let params_since = params.since.unwrap_or(min_millis);
+    let params_until = params.until.unwrap_or(max_millis);
+
+    // Get the edge of requested data
+    let mut since = min(min_millis, params_since);
+    let mut until = max(max_millis, params_until);
+
+    // Only retrieve the least amount of data
+    if since < min_millis && until <= max_millis {
+        until = min_millis
+    } else if since >= min_millis && until > max_millis {
+        since = max_millis
+    }
+
+    FilterParams {
+        since: Some(since),
+        until: Some(until),
+    }
+}
+
+/// Group the alerts and generate aggregate data, try get grouper from cache
+///
+/// # Params
+/// * alerts: Alerts to group
+/// * cache_service: Global state with cache connection
+///
+/// # Returns
+/// * Result with new [`AlertsDataGroup`] or an [`UpdateError`]
+pub async fn group_alerts(
+    alerts: AlertsGroup,
+    cache_service: Arc<CacheService>,
+) -> Result<AlertsDataGroup, UpdateError> {
+    // Group data, try get from cache the grouper
+    let alerts_grouper = match cache_service
+        .client
+        .get(ALERTS_GROUPER_CACHE_KEY)
+        .map_err(|e| UpdateError::Cache(CacheError::Request(e)))?
+    {
+        Some(alerts_grouper) => alerts_grouper,
+        None => {
+            let alerts_grouper =
+                AlertsGrouper::new((10, 20)).map_err(|e| UpdateError::Cache(CacheError::Grouping(e)))?;
+            cache_service
+                .client
+                .set(
+                    ALERTS_GROUPER_CACHE_KEY,
+                    &alerts_grouper,
+                    ALERTS_GROUPER_CACHE_EXP,
+                )
+                .map_err(|e| UpdateError::Cache(CacheError::Request(e)))?;
+
+            alerts_grouper
+        }
+    };
+
+    let alerts = alerts_grouper
+        .group(alerts, Arc::clone(&cache_service))
+        .await
+        .map_err(|e| UpdateError::Cache(CacheError::Grouping(e)))?;
+
+    Ok(alerts)
+}
+
 /// Create pool connection with postgres
 ///
 /// # Returns
@@ -22,10 +130,10 @@ pub async fn connect_to_db() -> Result<sqlx::Pool<sqlx::Postgres>, sqlx::Error> 
 // Test utils
 #[cfg(test)]
 pub mod test {
-    use std::sync::Once;
     use sqlx::Postgres;
+    use std::sync::Once;
 
-    use crate::models::alerts::{AlertsGroup, Location, Alert, AlertType};
+    use crate::models::alerts::{Alert, AlertType, AlertsGroup, Location};
 
     static INIT: Once = Once::new();
 
@@ -40,8 +148,7 @@ pub mod test {
     pub async fn get_test_db_pool() -> sqlx::Pool<sqlx::Postgres> {
         setup_test_env();
 
-        let database_url =
-            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set in .env.test");
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set in .env.test");
 
         sqlx::postgres::PgPoolOptions::new()
             .max_connections(5)
@@ -66,7 +173,6 @@ pub mod test {
             .await
             .clone()
     }
-
 
     // Clean test database
     pub async fn setup_test_db() -> sqlx::Pool<Postgres> {
