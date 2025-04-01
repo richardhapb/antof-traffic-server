@@ -59,8 +59,8 @@ async fn test_integrity() {
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // Clear cache before test
-    cache.client.delete(ALERTS_CACHE_KEY).unwrap();
-    cache.client.delete(MIN_PUB_MILLIS).unwrap();
+    cache.remove_key(ALERTS_CACHE_KEY).unwrap();
+    cache.remove_key(MIN_PUB_MILLIS).unwrap();
 
     let response_update = request_waze_data().await.unwrap();
 
@@ -90,14 +90,14 @@ async fn test_integrity() {
 #[tokio::test]
 #[serial]
 async fn test_old_data() {
-    let cache = CacheService::init_cache().await.client.clone();
+    let cache = CacheService::init_cache().await;
     let handler = start_http_server();
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // Clear cache before test
-    cache.delete(ALERTS_CACHE_KEY).unwrap();
-    cache.delete(MIN_PUB_MILLIS).unwrap();
+    cache.remove_key(ALERTS_CACHE_KEY).unwrap();
+    cache.remove_key(MIN_PUB_MILLIS).unwrap();
 
     // Get old data that don't exist in cache
     // 120 days ago

@@ -15,7 +15,7 @@ const ALERTS_GROUPER_CACHE_EXP: u32 = 604800; // One week
 /// # Example
 /// ```
 /// use antof_traffic::data::FilterParams;
-/// use antof_traffic::data::calculate_params;
+/// use antof_traffic::utils::calculate_params;
 ///
 /// let since = 10000;
 /// let until = 20000;

@@ -1,3 +1,9 @@
+use axum::{
+    Json,
+    extract::{Query, State},
+    http::StatusCode,
+};
+use serde::Deserialize;
 /// # Memcache traits implementation
 /// Implement all the necessary cache serialization and deserialization
 use std::io;
@@ -68,7 +74,9 @@ impl CacheService {
     {
         match self.client.get::<T>(key) {
             Ok(Some(value)) => Ok(value),
-            Ok(None) => Err(CacheError::NotFound(MemcacheError::CommandError(CommandError::KeyNotFound))),
+            Ok(None) => Err(CacheError::NotFound(MemcacheError::CommandError(
+                CommandError::KeyNotFound,
+            ))),
             Err(e) => {
                 tracing::error!("Failed to retrieve alerts from cache: {}", e);
                 Err(CacheError::Request(e))
@@ -90,6 +98,37 @@ impl CacheService {
                 tracing::error!("Error setting alerts data in cache: {}", e);
                 UpdateError::Cache(CacheError::Request(e))
             })
+    }
+
+    /// Remove a key from the cache
+    pub fn remove_key(&self, key: &str) -> Result<bool, CacheError> {
+        self.client.delete(key).map_err(CacheError::Request)
+    }
+}
+
+// AXUM handler
+
+#[derive(Debug, Deserialize)]
+pub struct CacheKey {
+    pub key: String,
+}
+
+/// Remove a key passed from an Http request
+pub async fn clear_cache(
+    Query(cache_key): Query<CacheKey>,
+    State(cache_service): State<Arc<CacheService>>,
+) -> Result<(StatusCode, Json<&'static str>), CacheError> {
+    if cache_key.key.is_empty() {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json("Key is required, use localhost:7070/clear-cache?key=<your-key>"),
+        ));
+    }
+
+    if cache_service.remove_key(&cache_key.key)? {
+        Ok((StatusCode::OK, Json("Key removed")))
+    } else {
+        Ok((StatusCode::NOT_FOUND, Json("Key not found")))
     }
 }
 
