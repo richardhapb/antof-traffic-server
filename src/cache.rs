@@ -1,16 +1,9 @@
-use axum::{
-    Json,
-    extract::{Query, State},
-    http::StatusCode,
-};
-use serde::Deserialize;
 /// # Memcache traits implementation
 /// Implement all the necessary cache serialization and deserialization
 use std::io;
 use std::io::Write;
 use std::sync::{Arc, OnceLock};
 
-use crate::data::{ALERTS_CACHE_EXP, ALERTS_CACHE_KEY};
 use crate::errors::{CacheError, UpdateError};
 use crate::models::alerts::{Alert, AlertType, AlertsDataGroup, AlertsGroup, AlertsGrouper};
 use memcache::{CommandError, FromMemcacheValue, MemcacheError, ToMemcacheValue};
@@ -21,6 +14,12 @@ pub const MEMCACHE_URI: &str = "memcache://127.0.0.1:11211";
 
 // Global state for cache, this ensure an stable unique connection
 static CACHE_SERVICE: OnceLock<Arc<CacheService>> = OnceLock::new();
+
+pub const ALERTS_CACHE_KEY: &str = "alerts_data";
+pub const ALERTS_CACHE_EXP: u32 = 604800; // One week
+
+pub const ALERTS_GROUPER_CACHE_KEY: &str = "alerts_grouper";
+pub const ALERTS_GROUPER_CACHE_EXP: u32 = 604800; // One week 
 
 /// Handles the cache service throught the application
 pub struct CacheService {
@@ -36,9 +35,9 @@ impl CacheService {
     pub async fn init_cache() -> Arc<CacheService> {
         CACHE_SERVICE
             .get_or_init(|| {
-                Arc::new(CacheService {
-                    client: memcache::Client::connect(MEMCACHE_URI).unwrap(),
-                })
+                Arc::new(CacheService::new(
+                    memcache::Client::connect(MEMCACHE_URI).unwrap(),
+                ))
             })
             .clone()
     }
@@ -103,32 +102,6 @@ impl CacheService {
     /// Remove a key from the cache
     pub fn remove_key(&self, key: &str) -> Result<bool, CacheError> {
         self.client.delete(key).map_err(CacheError::Request)
-    }
-}
-
-// AXUM handler
-
-#[derive(Debug, Deserialize)]
-pub struct CacheKey {
-    pub key: String,
-}
-
-/// Remove a key passed from an Http request
-pub async fn clear_cache(
-    Query(cache_key): Query<CacheKey>,
-    State(cache_service): State<Arc<CacheService>>,
-) -> Result<(StatusCode, Json<&'static str>), CacheError> {
-    if cache_key.key.is_empty() {
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            Json("Key is required, use localhost:7070/clear-cache?key=<your-key>"),
-        ));
-    }
-
-    if cache_service.remove_key(&cache_key.key)? {
-        Ok((StatusCode::OK, Json("Key removed")))
-    } else {
-        Ok((StatusCode::NOT_FOUND, Json("Key not found")))
     }
 }
 

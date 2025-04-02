@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-anyhow = "1.0.97"
 axum = { version = "0.8.1", features = ["http1", "tokio", "macros"]}
 chrono = "0.4.11"
 chrono-tz = "0.10.1"

@@ -1,12 +1,26 @@
-use crate::cache::CacheService;
-use crate::data::FilterParams;
+use crate::cache::{CacheService, ALERTS_GROUPER_CACHE_KEY, ALERTS_GROUPER_CACHE_EXP};
+use crate::server::FilterParams;
 use crate::errors::{CacheError, UpdateError};
 use crate::models::alerts::{AlertsDataGroup, AlertsGroup, AlertsGrouper};
 use std::cmp::{max, min};
 use std::sync::Arc;
 
-const ALERTS_GROUPER_CACHE_KEY: &str = "alerts_grouper";
-const ALERTS_GROUPER_CACHE_EXP: u32 = 604800; // One week 
+/// Get the range of the [`FilterParams`] and return
+/// `since` and `until` with the correct values
+///
+/// The return value must be between `ALERTS_BEGIN_TIMESTAMP`
+/// and the current time, inclusively.
+#[macro_export] macro_rules! get_time_range {
+    ($params:expr) => {{
+        let now = Utc::now().timestamp() * 1000;
+        let since = max(
+            ALERTS_BEGIN_TIMESTAMP,
+            $params.since.unwrap_or(ALERTS_BEGIN_TIMESTAMP),
+        );
+        let until = min(now, $params.until.unwrap_or(now));
+        (since, until)
+    }};
+}
 
 /// Calculate the min and max pub_millis from params and match since/until
 /// to the max or min pub_millis, if params.since and params.until are larger
