@@ -167,7 +167,6 @@ pub async fn clear_cache(
 
 /// Transform [`AlertsGroup`] to [`AlertsDataGroup`] adding
 /// aggregate data and grouping.
-#[axum::debug_handler]
 pub async fn aggregate(
     State(cache_service): State<Arc<CacheService>>,
     Json(alerts_group): Json<AlertsGroup>,

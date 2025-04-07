@@ -1,20 +1,65 @@
 use antof_traffic::cache::{ALERTS_CACHE_KEY, CacheService};
 use antof_traffic::data::MIN_PUB_MILLIS_CACHE_KEY;
-use antof_traffic::models::{alerts::AlertsDataGroup, jams::JamsGroup};
+use antof_traffic::models::{
+    alerts::{Alert, AlertType, AlertsDataGroup, AlertsGroup, Location},
+    jams::JamsGroup,
+};
 use antof_traffic::server::create_server;
 use chrono::Utc;
+use reqwest::Client;
 use serial_test::serial;
 use tokio::task::JoinHandle;
 
 const TEST_SERVER_URL_UPDATE: &str = "http://0.0.0.0:7070/update-data";
 const TEST_SERVER_URL_GET: &str = "http://0.0.0.0:7070/get-data?since={since}";
 const TEST_CLEAR_CACHE_URL: &str = "http://0.0.0.0:7070/clear-cache?key={key}";
+const TEST_AGGREGATE_URL: &str = "http://0.0.0.0:7070/aggregate";
 
 fn start_http_server() -> JoinHandle<()> {
     dotenv::dotenv().ok();
     tokio::task::spawn(async {
         create_server().await.unwrap();
     })
+}
+
+// Create test data
+pub fn setup_alerts() -> AlertsGroup {
+    let alerts: Vec<Alert> = vec![
+        Alert {
+            uuid: uuid::Uuid::parse_str("a0f93cf6-9099-4962-8f9a-72c30186571c").unwrap(),
+            reliability: Some(2),
+            alert_type: Some(AlertType::Accident),
+            road_type: Some(2),
+            magvar: Some(3.0),
+            subtype: Some("Some accident".to_string()),
+            location: Some(Location {
+                id: 0,
+                x: -70.39831,
+                y: -23.651636,
+            }),
+            street: Some("Av. Pedro Aguirre Cerda".to_string()),
+            pub_millis: 1736980027000,
+            end_pub_millis: None,
+        },
+        Alert {
+            uuid: uuid::Uuid::parse_str("a123f22e-e5e0-4c6c-8a4e-7434c4fd2110").unwrap(),
+            reliability: Some(2),
+            alert_type: Some(AlertType::Accident),
+            road_type: Some(2),
+            magvar: Some(3.3),
+            subtype: Some("Some accident".to_string()),
+            location: Some(Location {
+                id: 0,
+                x: -70.37841,
+                y: -23.625319,
+            }),
+            street: Some("Av. Pedro Aguirre Cerda".to_string()),
+            pub_millis: 1731210357000,
+            end_pub_millis: None,
+        },
+    ];
+
+    AlertsGroup { alerts }
 }
 
 #[tokio::test]
@@ -85,7 +130,50 @@ async fn test_integrity() {
 
     // The retrieved data should contain the data obtained from the API because
     // it should be inserted into the cache and `concat` method stores unique values
-    assert_eq!(alerts_get.alerts.len(), alerts_get.concat(alerts_update).alerts.len());
+    assert_eq!(
+        alerts_get.alerts.len(),
+        alerts_get.concat(alerts_update).alerts.len()
+    );
+    handler.abort();
+    let _ = handler.await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_aggregate() {
+    // Test the aggregate endpoint
+    CacheService::init_cache().await;
+    let handler = start_http_server();
+
+    // Add a delay to ensure server is ready before making requests
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    let client = Client::new();
+    let alerts = setup_alerts();
+
+    let response = client
+        .post(TEST_AGGREGATE_URL)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&alerts).unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+
+    let result = response.text().await.unwrap();
+    let res_alerts: AlertsDataGroup = serde_json::from_str(&result).unwrap();
+
+    assert_eq!(res_alerts.alerts.len(), alerts.alerts.len());
+    let alert = res_alerts.alerts.first().unwrap();
+
+    // Aggregate must be some
+    assert!(alert.group.is_some());
+    assert!(alert.week_day.is_some());
+    assert!(alert.day_type.is_some());
+    assert!(alert.day.is_some());
+    assert!(alert.hour.is_some());
+    assert!(alert.minute.is_some());
     handler.abort();
     let _ = handler.await;
 }
