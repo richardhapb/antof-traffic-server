@@ -2,7 +2,7 @@ use axum::{
     Json, Router,
     extract::{Query, State},
     http::StatusCode,
-    routing::get,
+    routing::{get, post},
 };
 use chrono::Utc;
 use std::{
@@ -20,7 +20,10 @@ use crate::{
     },
     errors::{CacheError, UpdateError},
     get_time_range,
-    models::{alerts::AlertsDataGroup, jams::JamsGroup},
+    models::{
+        alerts::{AlertsDataGroup, AlertsGroup},
+        jams::JamsGroup,
+    },
     utils::group_alerts,
 };
 use serde::Deserialize;
@@ -35,6 +38,7 @@ pub async fn create_server() -> Result<(), Box<dyn std::error::Error>> {
         .route("/update-data", get(update_data_from_api))
         .route("/get-data", get(get_data))
         .route("/clear-cache", get(clear_cache))
+        .route("/aggregate", post(aggregate))
         .with_state(cache_service);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:7070").await?;
@@ -158,5 +162,56 @@ pub async fn clear_cache(
         Ok((StatusCode::OK, Json("Key removed")))
     } else {
         Ok((StatusCode::NOT_FOUND, Json("Key not found")))
+    }
+}
+
+/// Transform [`AlertsGroup`] to [`AlertsDataGroup`] adding
+/// aggregate data and grouping.
+#[axum::debug_handler]
+pub async fn aggregate(
+    State(cache_service): State<Arc<CacheService>>,
+    Json(alerts_group): Json<AlertsGroup>,
+) -> Result<(StatusCode, Json<AlertsDataGroup>), UpdateError> {
+    // If is empty returns an empty array
+    if alerts_group.alerts.is_empty() {
+        tracing::info!("Received empty data, returning empty data");
+        return Ok((StatusCode::NO_CONTENT, Json(AlertsDataGroup { alerts: vec![] })));
+    }
+
+    // Write a sample ot the received data
+    tracing::info!("Received data to aggregate: {} ", alerts_group.alerts.len());
+    if let Some(first_alert) = alerts_group.alerts.first() {
+        if let Ok(sample) = serde_json::to_string(first_alert) {
+            tracing::info!("Sample: {:?} ", sample);
+        } else {
+            tracing::warn!("Failed to serialize first alert for logging");
+        }
+    } else {
+        tracing::warn!("No alerts to sample in received data");
+    }
+
+    let alerts = group_alerts(alerts_group, cache_service).await;
+
+    match alerts {
+        Ok(alerts) => {
+            // Write a sample of the transformed data
+            tracing::info!(
+                "Data transformed successfully, returning {} elements",
+                alerts.alerts.len()
+            );
+            if let Some(first_alert) = alerts.alerts.first() {
+                if let Ok(sample) = serde_json::to_string(first_alert) {
+                    tracing::info!("Sample: {} ", sample);
+                } else {
+                    tracing::warn!("Failed to serialize first transformed alert for logging");
+                }
+            }
+
+            Ok((StatusCode::OK, Json(alerts)))
+        }
+        Err(err) => {
+            tracing::error!("Error generating agregate data: {:?}", err);
+            Err(err)
+        }
     }
 }

@@ -114,7 +114,8 @@ pub struct Alert {
     pub reliability: Option<i16>,
     #[serde(rename = "type")]
     pub alert_type: Option<AlertType>,
-    #[serde(rename = "roadType")]
+    #[serde(rename(serialize = "road_type", deserialize = "roadType"))]
+    #[serde(alias = "road_type")]
     pub road_type: Option<i16>,
     pub magvar: Option<f32>,
     pub subtype: Option<String>,
