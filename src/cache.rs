@@ -6,6 +6,7 @@ use std::sync::{Arc, OnceLock};
 
 use crate::errors::{CacheError, UpdateError};
 use crate::models::alerts::{Alert, AlertType, AlertsDataGroup, AlertsGroup, AlertsGrouper};
+use crate::server::FilterParams;
 use chrono::Utc;
 use memcache::{CommandError, FromMemcacheValue, MemcacheError, ToMemcacheValue};
 
@@ -108,32 +109,63 @@ impl CacheService {
         self.client.delete(key).map_err(CacheError::Request)
     }
 
-    pub fn update_millis(&self, alerts: &AlertsDataGroup) -> Result<bool, CacheError> {
+    pub async fn update_millis(
+        &self,
+        alerts: Option<&AlertsDataGroup>,
+        params: Option<&FilterParams>,
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
         let now = Utc::now().timestamp() * 1000;
 
-        let min = alerts
-            .alerts
-            .iter()
-            .min_by_key(|a| a.alert.pub_millis)
-            .map_or_else(|| now, |a| a.alert.pub_millis);
-        let max = alerts
-            .alerts
-            .iter()
-            .max_by_key(|a| a.alert.pub_millis)
-            .map_or_else(|| now, |a| a.alert.pub_millis);
+        // Use a scoped block to ensure all temporary values are dropped
+        // when we're done with them
+        let (min, max) = {
+            // Get alerts data or retrieve from cache
+            let alerts_data: Option<AlertsDataGroup> = match alerts {
+                Some(_) => None,
+                None => {
+                    // Try to get from cache if no alerts provided
+                    self.client.get(ALERTS_CACHE_KEY).map_err(CacheError::Request)?
+                }
+            };
+
+            let alerts_data = &alerts_data;
+
+            // Use either the provided reference or the fetched data
+            match (alerts, alerts_data) {
+                (Some(alerts), _) | (_, Some(alerts)) => {
+                    // Find min and max
+                    let (min, max) = alerts.alerts.iter().fold((now, now), |(min, max), alert| {
+                        let ts = alert.alert.pub_millis;
+                        (min.min(ts), max.max(ts))
+                    });
+
+                    (min, max)
+                }
+                (None, None) => {
+                    // No alerts available anywhere
+                    (now, now)
+                }
+            }
+        };
+
+        // Keep the minimum value
+        let min = params.and_then(|p| p.since).map_or(min, |s| min.min(s));
 
         self.client
             .set(MIN_PUB_MILLIS_CACHE_KEY, min, 3600) // 1 hour expiration
             .map_err(|e| {
                 tracing::error!("Error setting min key data in cache: {}", e);
-                CacheError::Request(e)
+                Box::new(CacheError::Request(e))
             })?;
         self.client
             .set(MAX_PUB_MILLIS_CACHE_KEY, max, 3600) // 1 hour expiration
             .map_err(|e| {
                 tracing::error!("Error setting max key data in cache: {}", e);
-                CacheError::Request(e)
+                Box::new(CacheError::Request(e))
             })?;
+
+        tracing::info!("Set min pub_millis: {}", min);
+        tracing::info!("Set max pub_millis: {}", max);
 
         Ok(true)
     }

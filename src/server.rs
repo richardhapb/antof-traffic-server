@@ -83,7 +83,15 @@ pub async fn update_data_from_api(
     insert_and_update_data(&alerts, &jams).await?;
 
     let alerts = group_alerts(alerts, Arc::clone(&cache_service)).await?;
-    let alerts = concat_alerts_and_storage_to_cache(cache_service, alerts)?;
+    let alerts = concat_alerts_and_storage_to_cache(Arc::clone(&cache_service), alerts)?;
+
+    // TODO: simplify this
+    cache_service.update_millis(Some(&alerts), None).await.map_err(|e| {
+        UpdateError::Api(Box::new(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            e.to_string(),
+        )))
+    })?;
 
     Ok(Json((alerts, jams)))
 }
@@ -134,13 +142,17 @@ pub async fn get_data(
         None => get_data_from_database(&params, Arc::clone(&cache_service)).await?,
     };
 
-    // Store the new data
-    cache_service.store_alerts(&alerts)?;
+    let cs = Arc::clone(&cache_service);
 
     // Set the minimum `since` and `until` query to the cache
-    cache_service.update_millis(&alerts).map_err(UpdateError::Cache)?;
-    tracing::info!("Set min pub_millis: {}", since);
-    tracing::info!("Set max pub_millis: {}", until);
+    tokio::spawn(async move {
+        if let Err(e) = cs.update_millis(None, Some(&params)).await {
+            tracing::error!("Failed to update cache timestamps: {:?}", e);
+        }
+    });
+
+    // Store the new data
+    cache_service.store_alerts(&alerts)?;
 
     Ok(Json(alerts))
 }
