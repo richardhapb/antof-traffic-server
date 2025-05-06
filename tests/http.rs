@@ -1,5 +1,4 @@
-use antof_traffic::cache::{ALERTS_CACHE_KEY, CacheService};
-use antof_traffic::data::MIN_PUB_MILLIS_CACHE_KEY;
+use antof_traffic::cache::{ALERTS_CACHE_KEY, CacheService, MIN_PUB_MILLIS_CACHE_KEY};
 use antof_traffic::models::{
     alerts::{Alert, AlertType, AlertsDataGroup, AlertsGroup, Location},
     jams::JamsGroup,

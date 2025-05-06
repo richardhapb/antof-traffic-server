@@ -6,6 +6,7 @@ use std::sync::{Arc, OnceLock};
 
 use crate::errors::{CacheError, UpdateError};
 use crate::models::alerts::{Alert, AlertType, AlertsDataGroup, AlertsGroup, AlertsGrouper};
+use chrono::Utc;
 use memcache::{CommandError, FromMemcacheValue, MemcacheError, ToMemcacheValue};
 
 pub type MemcacheValue<T> = Result<T, MemcacheError>;
@@ -20,6 +21,9 @@ pub const ALERTS_CACHE_EXP: u32 = 604800; // One week
 
 pub const ALERTS_GROUPER_CACHE_KEY: &str = "alerts_grouper";
 pub const ALERTS_GROUPER_CACHE_EXP: u32 = 604800; // One week 
+
+pub const MIN_PUB_MILLIS_CACHE_KEY: &str = "min_pub_millis";
+pub const MAX_PUB_MILLIS_CACHE_KEY: &str = "max_pub_millis";
 
 /// Handles the cache service throught the application
 pub struct CacheService {
@@ -102,6 +106,36 @@ impl CacheService {
     /// Remove a key from the cache
     pub fn remove_key(&self, key: &str) -> Result<bool, CacheError> {
         self.client.delete(key).map_err(CacheError::Request)
+    }
+
+    pub fn update_millis(&self, alerts: &AlertsDataGroup) -> Result<bool, CacheError> {
+        let now = Utc::now().timestamp() * 1000;
+
+        let min = alerts
+            .alerts
+            .iter()
+            .min_by_key(|a| a.alert.pub_millis)
+            .map_or_else(|| now, |a| a.alert.pub_millis);
+        let max = alerts
+            .alerts
+            .iter()
+            .max_by_key(|a| a.alert.pub_millis)
+            .map_or_else(|| now, |a| a.alert.pub_millis);
+
+        self.client
+            .set(MIN_PUB_MILLIS_CACHE_KEY, min, 3600) // 1 hour expiration
+            .map_err(|e| {
+                tracing::error!("Error setting min key data in cache: {}", e);
+                CacheError::Request(e)
+            })?;
+        self.client
+            .set(MAX_PUB_MILLIS_CACHE_KEY, max, 3600) // 1 hour expiration
+            .map_err(|e| {
+                tracing::error!("Error setting max key data in cache: {}", e);
+                CacheError::Request(e)
+            })?;
+
+        Ok(true)
     }
 }
 

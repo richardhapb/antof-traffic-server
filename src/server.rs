@@ -12,11 +12,10 @@ use std::{
 
 use crate::{
     api,
-    cache::CacheService,
+    cache::{CacheService, MAX_PUB_MILLIS_CACHE_KEY, MIN_PUB_MILLIS_CACHE_KEY},
     data::{
-        ALERTS_BEGIN_TIMESTAMP, MAX_PUB_MILLIS_CACHE_KEY, MIN_PUB_MILLIS_CACHE_KEY, UPDATE_UNTIL_THRESHOLD,
-        concat_alerts_and_storage_to_cache, get_data_from_cache, get_data_from_database,
-        insert_and_update_data,
+        ALERTS_BEGIN_TIMESTAMP, UPDATE_UNTIL_THRESHOLD, concat_alerts_and_storage_to_cache,
+        get_data_from_cache, get_data_from_database, insert_and_update_data,
     },
     errors::{CacheError, UpdateError},
     get_time_range,
@@ -135,12 +134,12 @@ pub async fn get_data(
         None => get_data_from_database(&params, Arc::clone(&cache_service)).await?,
     };
 
-    // Set the minimum `since` query to the cache
+    // Store the new data
     cache_service.store_alerts(&alerts)?;
-    tracing::info!("Set min pub_millis: {}", since);
 
-    // Set the maximum `until` query to the cache if it exists
-    cache_service.store_alerts(&alerts)?;
+    // Set the minimum `since` and `until` query to the cache
+    cache_service.update_millis(&alerts).map_err(UpdateError::Cache)?;
+    tracing::info!("Set min pub_millis: {}", since);
     tracing::info!("Set max pub_millis: {}", until);
 
     Ok(Json(alerts))

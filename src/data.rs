@@ -1,4 +1,4 @@
-use crate::cache::{CacheService, ALERTS_CACHE_KEY};
+use crate::cache::{CacheService, ALERTS_CACHE_KEY, MIN_PUB_MILLIS_CACHE_KEY, MAX_PUB_MILLIS_CACHE_KEY};
 use crate::errors::{UpdateError, CacheError};
 use crate::models::{
     alerts::{AlertsDataGroup, AlertsGroup},
@@ -12,9 +12,6 @@ use std::cmp::{max, min};
 use std::sync::Arc;
 
 use chrono::Utc;
-
-pub const MIN_PUB_MILLIS_CACHE_KEY: &str = "min_pub_millis";
-pub const MAX_PUB_MILLIS_CACHE_KEY: &str = "max_pub_millis";
 
 pub const ALERTS_BEGIN_TIMESTAMP: i64 = 1727740800000; // 2024-10-01
 
@@ -152,6 +149,8 @@ pub fn concat_alerts_and_storage_to_cache(
 
     // Concat to previuos alerts in cache
     let alerts = prev_alerts.concat(alerts);
+
+    // Update the millis data
 
     tracing::info!("Setting data of alerts in cache");
     cache_service.store_alerts(&alerts)?;
