@@ -1,17 +1,20 @@
-use crate::cache::{CacheService, ALERTS_CACHE_KEY, MIN_PUB_MILLIS_CACHE_KEY, MAX_PUB_MILLIS_CACHE_KEY};
-use crate::errors::{UpdateError, CacheError};
+use crate::cache::{
+    ALERTS_CACHE_KEY, CacheService, MAX_PUB_MILLIS_CACHE_KEY, MIN_PUB_MILLIS_CACHE_KEY,
+};
+use crate::errors::{CacheError, UpdateError};
+use crate::get_time_range;
 use crate::models::{
     alerts::{AlertsDataGroup, AlertsGroup},
     jams::JamsGroup,
 };
-use crate::utils::{calculate_params, connect_to_db, group_alerts};
 use crate::server::FilterParams;
-use crate::get_time_range;
+use crate::utils::{calculate_params, connect_to_db, group_alerts};
 
 use std::cmp::{max, min};
 use std::sync::Arc;
 
 use chrono::Utc;
+use tracing::{debug, error, info};
 
 pub const ALERTS_BEGIN_TIMESTAMP: i64 = 1727740800000; // 2024-10-01
 
@@ -30,8 +33,8 @@ pub async fn get_data_from_database(
     params: &FilterParams,
     cache_service: Arc<CacheService>,
 ) -> Result<AlertsDataGroup, UpdateError> {
-    tracing::info!("Retrieving data from database...");
-    let pool = connect_to_db().await.map_err(UpdateError::Database)?;
+    info!("Retrieving data from database...");
+    let pool = connect_to_db().await?;
 
     let (since, until) = get_time_range!(params);
 
@@ -40,7 +43,7 @@ pub async fn get_data_from_database(
 
     // Calculate params
     let params = calculate_params(min_millis, max_millis, params);
-    tracing::info!("Params calculated: {:?}", params);
+    info!("Params calculated: {:?}", params);
 
     let query = format!(
         r#"
@@ -56,12 +59,12 @@ pub async fn get_data_from_database(
     let alerts: AlertsGroup = match sqlx::query_as(&query).fetch_all(&pool).await {
         Ok(alerts) => AlertsGroup { alerts },
         Err(e) => {
-            tracing::error!("Error retrieving data from database {}", e);
+            error!("Error retrieving data from database {}", e);
             return Err(UpdateError::Database(e));
         }
     };
 
-    tracing::info!("Grouping...");
+    info!("Grouping...");
 
     let alerts = group_alerts(alerts, Arc::clone(&cache_service)).await?;
 
@@ -69,7 +72,7 @@ pub async fn get_data_from_database(
     let mut alerts = concat_alerts_and_storage_to_cache(cache_service, alerts)?;
     alerts.filter_range(since, until);
 
-    tracing::info!("Data found: {}", alerts.alerts.len());
+    debug!("Data found: {}", alerts.alerts.len());
 
     Ok(alerts)
 }
@@ -86,14 +89,14 @@ pub async fn get_data_from_cache(
     cache_service: Arc<CacheService>,
     params: &FilterParams,
 ) -> Result<AlertsDataGroup, CacheError> {
-    tracing::info!("Retrieving data...");
+    info!("Retrieving data...");
 
     let (since, until) = get_time_range!(params);
 
-    let mut alerts: AlertsDataGroup = cache_service.get_or_cache_err(ALERTS_CACHE_KEY)?;
+    let mut alerts: AlertsDataGroup = cache_service.get_or_err(ALERTS_CACHE_KEY)?;
 
     alerts.filter_range(since, until);
-    tracing::info!("Data found: {}", alerts.alerts.len());
+    info!("Data found: {}", alerts.alerts.len());
 
     Ok(alerts)
 }
@@ -103,31 +106,26 @@ pub async fn get_data_from_cache(
 /// # Params
 /// * alerts: New alerts from API
 /// * jams: New jams from API
-pub async fn insert_and_update_data(alerts: &AlertsGroup, jams: &JamsGroup) -> Result<(), UpdateError> {
+pub async fn insert_and_update_data(
+    alerts: &AlertsGroup,
+    jams: &JamsGroup,
+) -> Result<(), UpdateError> {
     // Database insertions
-    let alerts_inserted = alerts.bulk_insert().await.map_err(|e| {
-        tracing::error!("Database Error (alerts): {:?}", e);
-        UpdateError::Database(e)
-    })?;
-
-    let j́ams_inserted = jams.bulk_insert().await.map_err(|e| {
-        tracing::error!("Database Error (jams): {:?}", e);
-        UpdateError::Database(e)
-    })?;
+    let alerts_inserted = alerts.bulk_insert().await?;
+    let j́ams_inserted = jams.bulk_insert().await?;
 
     // End pub millis update
-    let alerts_ends = alerts
-        .fill_end_pub_millis()
-        .await
-        .map_err(UpdateError::Database)?;
-    let jams_ends = jams.fill_end_pub_millis().await.map_err(UpdateError::Database)?;
+    let alerts_ends = alerts.fill_end_pub_millis().await?;
+    let jams_ends = jams.fill_end_pub_millis().await?;
 
-    tracing::info!(
+    info!(
         "{} alerts and {} jams inserted to database",
-        alerts_inserted,
-        j́ams_inserted
+        alerts_inserted, j́ams_inserted
     );
-    tracing::info!("{} alerts and {} jams end time updated", alerts_ends, jams_ends);
+    info!(
+        "{} alerts and {} jams end time updated",
+        alerts_ends, jams_ends
+    );
 
     Ok(())
 }
@@ -152,9 +150,9 @@ pub fn concat_alerts_and_storage_to_cache(
 
     // Update the millis data
 
-    tracing::info!("Setting data of alerts in cache");
+    info!("Setting data of alerts in cache");
     cache_service.store_alerts(&alerts)?;
-    tracing::info!("Data inserted to cache");
+    info!("Data inserted to cache");
 
     Ok(alerts)
 }
@@ -207,7 +205,9 @@ mod tests {
         cache_service.client.delete(ALERTS_CACHE_KEY).unwrap();
 
         // Group and insert data to cache
-        let alerts = group_alerts(alerts, Arc::clone(&cache_service)).await.unwrap();
+        let alerts = group_alerts(alerts, Arc::clone(&cache_service))
+            .await
+            .unwrap();
         cache_service.store_alerts(&alerts).unwrap();
 
         let until = Some(Utc::now().timestamp() * 1000);
@@ -264,7 +264,9 @@ mod tests {
             until: None,
         };
 
-        let alerts = get_data_from_database(&filters, cache_service).await.unwrap();
+        let alerts = get_data_from_database(&filters, cache_service)
+            .await
+            .unwrap();
 
         // Should return both alerts
         assert_eq!(alerts.alerts.len(), 2);

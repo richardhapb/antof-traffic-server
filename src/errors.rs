@@ -16,9 +16,34 @@ pub enum EventError<'a> {
 /// Errors while update data
 #[derive(Debug)]
 pub enum UpdateError {
-    Api(Box<dyn std::error::Error>),
+    Api(reqwest::Error),
+    ParseError(serde_json::Error),
     Database(sqlx::Error),
     Cache(CacheError),
+}
+
+impl From<sqlx::Error> for UpdateError {
+    fn from(value: sqlx::Error) -> Self {
+        Self::Database(value)
+    }
+}
+
+impl From<reqwest::Error> for UpdateError {
+    fn from(value: reqwest::Error) -> Self {
+        Self::Api(value)
+    }
+}
+
+impl From<serde_json::Error> for UpdateError {
+    fn from(value: serde_json::Error) -> Self {
+        Self::ParseError(value)
+    }
+}
+
+impl From<CacheError> for UpdateError {
+    fn from(value: CacheError) -> Self {
+        Self::Cache(value)
+    }
 }
 
 /// Errors while interact with cache
@@ -27,6 +52,12 @@ pub enum CacheError {
     Request(memcache::MemcacheError),
     NotFound(memcache::MemcacheError),
     Grouping(Box<dyn std::error::Error>),
+}
+
+impl From<memcache::MemcacheError> for CacheError {
+    fn from(value: memcache::MemcacheError) -> Self {
+        Self::Request(value)
+    }
 }
 
 impl Display for CacheError {
@@ -62,6 +93,7 @@ impl IntoResponse for UpdateError {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Database error: {}", e),
             ),
+            UpdateError::ParseError(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Error parsing data: {}", e)),
             UpdateError::Cache(e) => (StatusCode::BAD_GATEWAY, format!("Cache error: {:?}", e)),
         };
 
@@ -72,9 +104,18 @@ impl IntoResponse for UpdateError {
 impl IntoResponse for CacheError {
     fn into_response(self) -> axum::response::Response {
         let (status, error_message) = match self {
-            CacheError::Request(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Request error: {}", e)),
-            CacheError::NotFound(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Key not found: {}", e)),
-            CacheError::Grouping(e) => (StatusCode::BAD_GATEWAY, format!("Error grouping data: {}", e)),
+            CacheError::Request(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Request error: {}", e),
+            ),
+            CacheError::NotFound(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Key not found: {}", e),
+            ),
+            CacheError::Grouping(e) => (
+                StatusCode::BAD_GATEWAY,
+                format!("Error grouping data: {}", e),
+            ),
         };
 
         (status, Json(json!({ "error": error_message }))).into_response()

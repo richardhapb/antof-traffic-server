@@ -28,7 +28,7 @@ use std::sync::Arc;
 ///
 /// # Example
 /// ```
-/// use antof_traffic::data::FilterParams;
+/// use antof_traffic::server::FilterParams;
 /// use antof_traffic::utils::calculate_params;
 ///
 /// let since = 10000;

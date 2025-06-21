@@ -7,10 +7,11 @@ use ndarray::{Array1, Array2};
 
 use chrono::{DateTime, Datelike, Local, TimeZone, Timelike, Utc};
 use chrono_tz::America::Santiago;
+use tracing::{error, info, debug};
 
+use crate::cache::CacheService;
 use crate::errors::EventError;
 use crate::utils::connect_to_db;
-use crate::cache::CacheService;
 
 type FutureError = Box<dyn StdError + Send + Sync + 'static>;
 
@@ -352,8 +353,9 @@ impl AlertsDataGroup {
     /// Set alerts in a date range between `init_pub_millis` and `end_pub_millis`
     /// inplace for avoid memory duplicates
     pub fn filter_range(&mut self, init_pub_millis: i64, end_pub_millis: i64) {
-        self.alerts
-            .retain(|a| a.alert.pub_millis >= init_pub_millis && a.alert.pub_millis <= end_pub_millis);
+        self.alerts.retain(|a| {
+            a.alert.pub_millis >= init_pub_millis && a.alert.pub_millis <= end_pub_millis
+        });
     }
 }
 
@@ -402,7 +404,8 @@ impl AlertData {
         let utc_timestamp = alert.pub_millis;
 
         // Convert milliseconds timestamp to DateTime<Utc>
-        let utc_time = DateTime::<Utc>::from_timestamp_millis(utc_timestamp).expect("Invalid timestamp");
+        let utc_time =
+            DateTime::<Utc>::from_timestamp_millis(utc_timestamp).expect("Invalid timestamp");
 
         // Convert to Santiago timezone
         let cl_time = Santiago.from_utc_datetime(&utc_time.naive_utc());
@@ -494,7 +497,7 @@ impl AlertsGrouper {
                 Some(match self.get_quadrant_indexes((x, y)) {
                     Ok((x, y)) => self.calc_quadrant(x, y),
                     Err(e) => {
-                        tracing::error!("Error getting group: {}", e);
+                        error!("Error getting group: {}", e);
                         0
                     }
                 }),
@@ -555,9 +558,13 @@ impl AlertsGrouper {
     }
 
     /// Create the grid of the segments in the map
-    fn get_grid(&mut self, xdiv: usize, ydiv: usize) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    fn get_grid(
+        &mut self,
+        xdiv: usize,
+        ydiv: usize,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Antofagasta coodinates bounds
-        let xmin = -70.43627;
+        let xmin = -70.43634;
         let xmax = -70.36259;
         let ymin = -23.724215;
         let ymax = -23.485813;
@@ -625,7 +632,7 @@ pub async fn get_holidays(cache_service: Arc<CacheService>) -> Result<Holidays, 
     }
 
     // Load from file while cache is retrieving
-    tracing::info!("Loading holidays from file");
+    info!("Loading holidays from file");
     // If not in cache, try loading from file
     match fs::read_to_string(HD_PATH) {
         Ok(contents) => {
@@ -636,17 +643,17 @@ pub async fn get_holidays(cache_service: Arc<CacheService>) -> Result<Holidays, 
             let cache_service_clone = Arc::clone(&cache_service);
 
             // Trigger async update in background
-            tracing::info!("Throwing background holidays update");
+            info!("Throwing background holidays update");
             tokio::spawn(async move {
                 if let Err(e) = update_holidays(&cache_service_clone).await {
-                    tracing::error!("Background update failed: {}", e);
+                    error!("Background update failed: {}", e);
                 }
             });
 
             Ok(holidays)
         }
         Err(e) => {
-            tracing::error!("Error reading file: {}", e);
+            error!("Error reading file: {}", e);
             // If file read fails, do an immediate update in a blocking manner:
             let holidays = tokio::task::spawn_blocking(move || {
                 // Create a dedicated runtime on the blocking thread
@@ -666,7 +673,9 @@ pub async fn get_holidays(cache_service: Arc<CacheService>) -> Result<Holidays, 
 ///
 /// # Returns
 /// * Result enum with Holidays or an error
-async fn update_holidays(cache_service: &Arc<CacheService>) -> Result<Holidays, Box<dyn Error + Send + Sync>> {
+async fn update_holidays(
+    cache_service: &Arc<CacheService>,
+) -> Result<Holidays, Box<dyn Error + Send + Sync>> {
     let holidays_api: String = env::var("HOLIDAYS_API")?;
 
     let current_year = Local::now().year();
@@ -688,7 +697,7 @@ async fn update_holidays(cache_service: &Arc<CacheService>) -> Result<Holidays, 
         holidays = serde_json::from_str::<Holidays>(&response.text().await?)?;
     }
 
-    tracing::debug!("Writing data of holidays to file {:?}", holidays);
+    debug!("Writing data of holidays to file {:?}", holidays);
     fs::write(HD_PATH, serde_json::to_string_pretty(&holidays)?)?;
 
     let json_bytes = serde_json::to_vec(&holidays)?;
@@ -762,7 +771,9 @@ mod tests {
         alert.street = None;
         alert.end_pub_millis = None;
 
-        let alerts = AlertsGroup { alerts: vec![alert] };
+        let alerts = AlertsGroup {
+            alerts: vec![alert],
+        };
 
         let result = alerts.bulk_insert().await.unwrap();
         assert_eq!(result, 1);
@@ -868,7 +879,10 @@ mod tests {
         let alerts_group = setup_alerts();
 
         // Update holidays from API
-        let grouped_alerts = alerts_grouper.group(alerts_group, cache_service).await.unwrap();
+        let grouped_alerts = alerts_grouper
+            .group(alerts_group, cache_service)
+            .await
+            .unwrap();
         let alert = grouped_alerts.alerts.first().unwrap();
 
         // 2025-01-15 is a workday and group for the location is 82

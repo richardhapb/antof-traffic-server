@@ -4,11 +4,12 @@ use std::io;
 use std::io::Write;
 use std::sync::{Arc, OnceLock};
 
-use crate::errors::{CacheError, UpdateError};
+use crate::errors::CacheError;
 use crate::models::alerts::{Alert, AlertType, AlertsDataGroup, AlertsGroup, AlertsGrouper};
 use crate::server::FilterParams;
 use chrono::Utc;
 use memcache::{CommandError, FromMemcacheValue, MemcacheError, ToMemcacheValue};
+use tracing::{debug, error};
 
 pub type MemcacheValue<T> = Result<T, MemcacheError>;
 
@@ -72,7 +73,7 @@ impl CacheService {
     ///
     /// # Returns
     /// * Result with retrieved data, default or [`CacheError`]
-    pub fn get_or_cache_err<T>(&self, key: &str) -> Result<T, CacheError>
+    pub fn get_or_err<T>(&self, key: &str) -> Result<T, CacheError>
     where
         T: ToMemcacheValue<Vec<u8>> + FromMemcacheValue,
     {
@@ -82,7 +83,7 @@ impl CacheService {
                 CommandError::KeyNotFound,
             ))),
             Err(e) => {
-                tracing::error!("Failed to retrieve alerts from cache: {}", e);
+                error!("Failed to retrieve alerts from cache: {}", e);
                 Err(CacheError::Request(e))
             }
         }
@@ -95,25 +96,23 @@ impl CacheService {
     ///
     /// # Returns
     /// `Result` instance with Ok or error if there is an error
-    pub fn store_alerts(&self, alerts: &AlertsDataGroup) -> Result<(), UpdateError> {
+    pub fn store_alerts(&self, alerts: &AlertsDataGroup) -> Result<(), CacheError> {
         self.client
-            .set(ALERTS_CACHE_KEY, alerts, ALERTS_CACHE_EXP)
-            .map_err(|e| {
-                tracing::error!("Error setting alerts data in cache: {}", e);
-                UpdateError::Cache(CacheError::Request(e))
-            })
+            .set(ALERTS_CACHE_KEY, alerts, ALERTS_CACHE_EXP)?;
+        Ok(())
     }
 
     /// Remove a key from the cache
-    pub fn remove_key(&self, key: &str) -> Result<bool, CacheError> {
-        self.client.delete(key).map_err(CacheError::Request)
+    pub fn remove_key(&self, key: &str) -> Result<(), CacheError> {
+        self.client.delete(key)?;
+        Ok(())
     }
 
     pub async fn update_millis(
         &self,
         alerts: Option<&AlertsDataGroup>,
         params: Option<&FilterParams>,
-    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<bool, CacheError> {
         let now = Utc::now().timestamp() * 1000;
 
         // Use a scoped block to ensure all temporary values are dropped
@@ -124,7 +123,7 @@ impl CacheService {
                 Some(_) => None,
                 None => {
                     // Try to get from cache if no alerts provided
-                    self.client.get(ALERTS_CACHE_KEY).map_err(CacheError::Request)?
+                    self.client.get(ALERTS_CACHE_KEY)?
                 }
             };
 
@@ -151,21 +150,12 @@ impl CacheService {
         // Keep the minimum value
         let min = params.and_then(|p| p.since).map_or(min, |s| min.min(s));
 
-        self.client
-            .set(MIN_PUB_MILLIS_CACHE_KEY, min, 3600) // 1 hour expiration
-            .map_err(|e| {
-                tracing::error!("Error setting min key data in cache: {}", e);
-                Box::new(CacheError::Request(e))
-            })?;
-        self.client
-            .set(MAX_PUB_MILLIS_CACHE_KEY, max, 3600) // 1 hour expiration
-            .map_err(|e| {
-                tracing::error!("Error setting max key data in cache: {}", e);
-                Box::new(CacheError::Request(e))
-            })?;
+        // 1 hour expiration
+        self.client.set(MIN_PUB_MILLIS_CACHE_KEY, min, 3600)?;
+        self.client.set(MAX_PUB_MILLIS_CACHE_KEY, max, 3600)?;
 
-        tracing::info!("Set min pub_millis: {}", min);
-        tracing::info!("Set max pub_millis: {}", max);
+        debug!("Set min pub_millis: {}", min);
+        debug!("Set max pub_millis: {}", max);
 
         Ok(true)
     }

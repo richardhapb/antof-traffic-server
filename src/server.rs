@@ -26,10 +26,11 @@ use crate::{
     utils::group_alerts,
 };
 use serde::Deserialize;
+use tracing::{error, info, warn};
 
 /// Main server handler
 pub async fn create_server() -> Result<(), Box<dyn std::error::Error>> {
-    tracing::info!("Starting server on 0.0.0.0:7070");
+    info!("Starting server on 0.0.0.0:7070");
 
     let cache_service = CacheService::init_cache().await;
 
@@ -41,7 +42,7 @@ pub async fn create_server() -> Result<(), Box<dyn std::error::Error>> {
         .with_state(cache_service);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:7070").await?;
-    tracing::info!("Server is running on http://0.0.0.0:7070");
+    info!("Server is running on http://0.0.0.0:7070");
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -72,26 +73,17 @@ pub struct CacheKey {
 pub async fn update_data_from_api(
     State(cache_service): State<Arc<CacheService>>,
 ) -> Result<Json<(AlertsDataGroup, JamsGroup)>, UpdateError> {
-    tracing::info!("Starting update_data_from_api request");
+    info!("Starting update_data_from_api request");
 
     // Get data from API
-    let (alerts, jams) = api::request_and_parse().await.map_err(|e| {
-        tracing::error!("API Error: {:?}", e);
-        UpdateError::Api(e)
-    })?;
+    let (alerts, jams) = api::request_and_parse().await?;
 
     insert_and_update_data(&alerts, &jams).await?;
 
     let alerts = group_alerts(alerts, Arc::clone(&cache_service)).await?;
     let alerts = concat_alerts_and_storage_to_cache(Arc::clone(&cache_service), alerts)?;
 
-    // TODO: simplify this
-    cache_service.update_millis(Some(&alerts), None).await.map_err(|e| {
-        UpdateError::Api(Box::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            e.to_string(),
-        )))
-    })?;
+    cache_service.update_millis(Some(&alerts), None).await?;
 
     Ok(Json((alerts, jams)))
 }
@@ -110,7 +102,7 @@ pub async fn get_data(
 ) -> Result<Json<AlertsDataGroup>, UpdateError> {
     // Check for data in cache
 
-    tracing::info!("Params received: {:?}", params);
+    info!("Params received: {:?}", params);
     let mut alerts: Option<_> = None;
 
     let (since, until) = get_time_range!(params);
@@ -118,9 +110,9 @@ pub async fn get_data(
     let min_millis = cache_service.get_or_default(MIN_PUB_MILLIS_CACHE_KEY, since);
     let max_millis = cache_service.get_or_default(MAX_PUB_MILLIS_CACHE_KEY, until);
 
-    tracing::info!("Retrieving data from cache with params");
-    tracing::info!("min pub_millis: {}", min_millis);
-    tracing::info!("max pub_millis: {}", max_millis);
+    info!("Retrieving data from cache with params");
+    info!("min pub_millis: {}", min_millis);
+    info!("max pub_millis: {}", max_millis);
 
     // If the data from cache is larger than the data requested, return the cache
     // Only retrieve from cache if since is present
@@ -129,8 +121,8 @@ pub async fn get_data(
         alerts = match get_data_from_cache(Arc::clone(&cache_service), &params).await {
             Ok(alerts) => Some(alerts),
             Err(e) => {
-                tracing::info!("Data not found in cache, retrieving from database...");
-                tracing::info!("{:?}", e);
+                info!("Data not found in cache, retrieving from database...");
+                info!("{:?}", e);
                 None
             }
         };
@@ -147,7 +139,7 @@ pub async fn get_data(
     // Set the minimum `since` and `until` query to the cache
     tokio::spawn(async move {
         if let Err(e) = cs.update_millis(None, Some(&params)).await {
-            tracing::error!("Failed to update cache timestamps: {:?}", e);
+            error!("Failed to update cache timestamps: {:?}", e);
         }
     });
 
@@ -169,10 +161,9 @@ pub async fn clear_cache(
         ));
     }
 
-    if cache_service.remove_key(&cache_key.key)? {
-        Ok((StatusCode::OK, Json("Key removed")))
-    } else {
-        Ok((StatusCode::NOT_FOUND, Json("Key not found")))
+    match cache_service.remove_key(&cache_key.key) {
+        Ok(_) => Ok((StatusCode::OK, Json("Key removed"))),
+        Err(_) => Ok((StatusCode::NOT_FOUND, Json("Key not found"))),
     }
 }
 
@@ -184,20 +175,23 @@ pub async fn aggregate(
 ) -> Result<(StatusCode, Json<AlertsDataGroup>), UpdateError> {
     // If is empty returns an empty array
     if alerts_group.alerts.is_empty() {
-        tracing::info!("Received empty data, returning empty data");
-        return Ok((StatusCode::NO_CONTENT, Json(AlertsDataGroup { alerts: vec![] })));
+        info!("Received empty data, returning empty data");
+        return Ok((
+            StatusCode::NO_CONTENT,
+            Json(AlertsDataGroup { alerts: vec![] }),
+        ));
     }
 
     // Write a sample ot the received data
-    tracing::info!("Received data to aggregate: {} ", alerts_group.alerts.len());
+    info!("Received data to aggregate: {} ", alerts_group.alerts.len());
     if let Some(first_alert) = alerts_group.alerts.first() {
         if let Ok(sample) = serde_json::to_string(first_alert) {
-            tracing::info!("Sample: {:?} ", sample);
+            info!("Sample: {:?} ", sample);
         } else {
-            tracing::warn!("Failed to serialize first alert for logging");
+            warn!("Failed to serialize first alert for logging");
         }
     } else {
-        tracing::warn!("No alerts to sample in received data");
+        warn!("No alerts to sample in received data");
     }
 
     let alerts = group_alerts(alerts_group, cache_service).await;
@@ -205,22 +199,22 @@ pub async fn aggregate(
     match alerts {
         Ok(alerts) => {
             // Write a sample of the transformed data
-            tracing::info!(
+            info!(
                 "Data transformed successfully, returning {} elements",
                 alerts.alerts.len()
             );
             if let Some(first_alert) = alerts.alerts.first() {
                 if let Ok(sample) = serde_json::to_string(first_alert) {
-                    tracing::info!("Sample: {} ", sample);
+                    info!("Sample: {} ", sample);
                 } else {
-                    tracing::warn!("Failed to serialize first transformed alert for logging");
+                    warn!("Failed to serialize first transformed alert for logging");
                 }
             }
 
             Ok((StatusCode::OK, Json(alerts)))
         }
         Err(err) => {
-            tracing::error!("Error generating agregate data: {:?}", err);
+            error!("Error generating agregate data: {:?}", err);
             Err(err)
         }
     }
