@@ -42,7 +42,7 @@ impl AlertType {
         }
     }
 
-    pub fn from(string: &str) -> Result<Self, EventError> {
+    pub fn from(string: &str) -> Result<Self, EventError<'_>> {
         match string {
             "ACCIDENT" => Ok(AlertType::Accident),
             "CONSTRUCTION" => Ok(AlertType::Construction),

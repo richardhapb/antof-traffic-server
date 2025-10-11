@@ -100,7 +100,7 @@ pub struct JamSegment {
 /// Struct with vector of `Jam`
 #[derive(Serialize, Deserialize, Debug)]
 pub struct JamsGroup {
-    jams: Vec<Jam>,
+    jams: Option<Vec<Jam>>,
 }
 
 impl JamLine {
@@ -141,12 +141,15 @@ impl JamsGroup {
     /// Insert a group of jams from API in a bulk insert
     /// ensuring the efficiency and avoid bucles
     pub async fn bulk_insert(&self) -> Result<u64, sqlx::Error> {
-        if self.jams.is_empty() {
+        let jams = vec![];
+        let jams = self.jams.as_ref().unwrap_or(&jams);
+
+        if jams.is_empty() {
             return Ok(0);
         }
 
         let pg_pool = connect_to_db().await?;
-        let jams_len = self.jams.len();
+        let jams_len = jams.len();
 
         let (
             mut uuids,
@@ -176,7 +179,7 @@ impl JamsGroup {
         let mut segments: Vec<JamSegment> = vec![];
 
         // Prepare data for insertion: jams and internal objects lines and segments
-        for jam in &self.jams {
+        for jam in jams {
             uuids.push(jam.uuid);
             levels.push(jam.level.map(|l| l as i16));
             speed_kmhs.push(jam.speed_kmh);
@@ -265,25 +268,29 @@ impl JamsGroup {
     /// Fill end pub millis field in database with current time for all
     /// data without it and is not present in last data
     pub async fn fill_end_pub_millis(&self) -> Result<u64, sqlx::Error> {
-        let mut uuids = Vec::with_capacity(self.jams.len());
+        if let Some(jams) = &self.jams {
+            let mut uuids = Vec::with_capacity(jams.len());
 
-        for jam in self.jams.iter() {
-            let uuid = jam.uuid;
-            uuids.push(uuid);
-        }
+            for jam in jams.iter() {
+                let uuid = jam.uuid;
+                uuids.push(uuid);
+            }
 
-        let pool = connect_to_db().await?;
+            let pool = connect_to_db().await?;
 
-        let result = sqlx::query!(
-            r#"
+            let result = sqlx::query!(
+                r#"
         UPDATE jams SET end_pub_millis = EXTRACT(EPOCH FROM NOW() AT TIME ZONE 'UTC')
         WHERE uuid <> ALL($1::bigint[]) AND end_pub_millis IS NULL
     "#,
-            &uuids
-        )
-        .execute(&pool)
-        .await?;
+                &uuids
+            )
+            .execute(&pool)
+            .await?;
 
-        Ok(result.rows_affected())
+            Ok(result.rows_affected())
+        } else {
+            Ok(0)
+        }
     }
 }
