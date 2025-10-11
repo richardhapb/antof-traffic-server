@@ -564,10 +564,10 @@ impl AlertsGrouper {
         ydiv: usize,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Antofagasta coodinates bounds
-        let xmin = -70.43634;
-        let xmax = -70.36259;
-        let ymin = -23.724215;
-        let ymax = -23.485813;
+        let xmin = -70.43700;
+        let xmax = -70.36200;
+        let ymin = -23.724300;
+        let ymax = -23.485800;
 
         let bounds_x = Array1::linspace(xmin, xmax, xdiv);
         let bounds_y = Array1::linspace(ymin, ymax, ydiv);
