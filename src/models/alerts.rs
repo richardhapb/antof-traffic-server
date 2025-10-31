@@ -1,13 +1,13 @@
 use serde::{Deserialize, Serialize, ser::StdError};
 use sqlx::{FromRow, Row, Type, postgres::PgRow};
-use std::{collections::HashSet, env, error::Error, fs, hash::Hash, path::Path, sync::Arc};
+use std::{collections::HashSet, fs, hash::Hash, path::Path, sync::Arc};
 use uuid::Uuid;
 
 use ndarray::{Array1, Array2};
 
-use chrono::{DateTime, Datelike, Local, TimeZone, Timelike, Utc};
+use chrono::{DateTime, Datelike, TimeZone, Timelike, Utc};
 use chrono_tz::America::Santiago;
-use tracing::{debug, error, info};
+use tracing::{error, info};
 
 use crate::cache::CacheService;
 use crate::errors::EventError;
@@ -66,46 +66,46 @@ pub struct Location {
     pub y: f32,
 }
 
-/// # API RESPONSE
-/// Element: Type     |               Description
-/// ----------------------------------------------------
-/// * location: Coordinates              | Location per report (X Y - Long-lat)
-/// * uuid: String                       | Unique system ID
-/// * magvar Integer (0-359)             | Event direction (Driver heading at report time. 0 degrees at North, according to the driver’s device)
-/// * type: See alert type table         | Event type
-/// * subtype: See alert sub types table | Event sub type - depends on atof parameter
-/// * reportDescription: String          | Report description (supplied when available)
-/// * street: String                     | Street name (as is written in database, no canonical form, may be null)
-/// * city: String                       | City and state name [City, State] in case both are available, [State] if not associated with a city. (supplied when available)
-/// * country: String                    | (see two letters codes in http://en.wikipedia.org/wiki/ISO_3166-1)
-/// * roadType: Integer                  | Road type (see road types)
-/// * reportRating: Integer              | User rank between 1-6 ( 6 = high ranked user)
-/// * jamUuid: string                    | If the alert is connected to a jam - jam ID
-/// * Reliability: 0-10                  | Reliability score based on user reactions and reporter level
-/// * confidence: 0-10                   | Confidence score based on user reactions
-/// * reportByMunicipalityUser: Boolean  | Alert reported by municipality user (partner) Optional.
-/// * nThumbsUp: integer                 | Number of thumbs up by users
-/// ---
-/// ## Road type
-/// ### Value    |    Type
-/// *  1      |  Streets
-/// *  2      |  Primary Street
-/// *  3      |  Freeways
-/// *  4      |  Ramps
-/// *  5      |  Trails
-/// *  6      |  Primary
-/// *  7      |  Secondary
-/// *  8, 14  |  4X4 Trails
-/// *  15     |  Ferry crossing
-/// *  9      |  Walkway
-/// *  10     |  Pedestrian
-/// *  11     |  Exit
-/// *  16     |  Stairway
-/// *  17     |  Private road
-/// *  18     |  Railroads
-/// *  19     |  Runway/Taxiway
-/// *  20     |  Parking lot road
-/// *  21     |  Service road
+// # API RESPONSE
+// Element: Type     |               Description
+// ----------------------------------------------------
+// * location: Coordinates              | Location per report (X Y - Long-lat)
+// * uuid: String                       | Unique system ID
+// * magvar Integer (0-359)             | Event direction (Driver heading at report time. 0 degrees at North, according to the driver’s device)
+// * type: See alert type table         | Event type
+// * subtype: See alert sub types table | Event sub type - depends on atof parameter
+// * reportDescription: String          | Report description (supplied when available)
+// * street: String                     | Street name (as is written in database, no canonical form, may be null)
+// * city: String                       | City and state name [City, State] in case both are available, [State] if not associated with a city. (supplied when available)
+// * country: String                    | (see two letters codes in http://en.wikipedia.org/wiki/ISO_3166-1)
+// * roadType: Integer                  | Road type (see road types)
+// * reportRating: Integer              | User rank between 1-6 ( 6 = high ranked user)
+// * jamUuid: string                    | If the alert is connected to a jam - jam ID
+// * Reliability: 0-10                  | Reliability score based on user reactions and reporter level
+// * confidence: 0-10                   | Confidence score based on user reactions
+// * reportByMunicipalityUser: Boolean  | Alert reported by municipality user (partner) Optional.
+// * nThumbsUp: integer                 | Number of thumbs up by users
+// ---
+// ## Road type
+// ### Value    |    Type
+// *  1      |  Streets
+// *  2      |  Primary Street
+// *  3      |  Freeways
+// *  4      |  Ramps
+// *  5      |  Trails
+// *  6      |  Primary
+// *  7      |  Secondary
+// *  8, 14  |  4X4 Trails
+// *  15     |  Ferry crossing
+// *  9      |  Walkway
+// *  10     |  Pedestrian
+// *  11     |  Exit
+// *  16     |  Stairway
+// *  17     |  Private road
+// *  18     |  Railroads
+// *  19     |  Runway/Taxiway
+// *  20     |  Parking lot road
+// *  21     |  Service road
 
 // Main alerts structure
 #[cfg_attr(test, derive(Clone))]
@@ -366,7 +366,7 @@ struct Holiday {
 }
 
 /// Grouped holidays, handle response from API
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 pub struct Holidays {
     status: Option<String>,
     data: Vec<Holiday>,
@@ -392,11 +392,6 @@ impl AlertData {
     /// * alert: Associated alert that is expanded with aggregates
     /// * holidays: Holidays struct with holidays from the API or cache
     /// * group: Segment where the alert is located
-    /// * day: Day of the month
-    /// * week_day: Day of the week
-    /// * day_type: `s` for weekday, `f` for weekends or holidays
-    /// * hour: Hour of the day
-    /// * minute: Minute of the hour
     ///
     /// # Returns
     /// * A new AlertData instance
@@ -564,10 +559,10 @@ impl AlertsGrouper {
         ydiv: usize,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Antofagasta coodinates bounds
-        let xmin = -70.43700;
-        let xmax = -70.36200;
-        let ymin = -23.724300;
-        let ymax = -23.485400;
+        let xmin = -70.437;
+        let xmax = -70.362;
+        let ymin = -23.724_3;
+        let ymax = -23.485_4;
 
         let bounds_x = Array1::linspace(xmin, xmax, xdiv);
         let bounds_y = Array1::linspace(ymin, ymax, ydiv);
@@ -609,7 +604,7 @@ fn meshgrid(
 // Holiday cache data values
 const HD_CACHE_KEY: &str = "holidays_data";
 const HD_CACHE_EXPIRY: u32 = 2592000; // 30 days in seconds
-const HD_PATH: &str = "data/holidays.json";
+const HD_PATH: &str = "data/holidays_{year}.json";
 
 /// Get the holidays from cache, the backup file or in last instance from API
 ///
@@ -633,87 +628,35 @@ pub async fn get_holidays(cache_service: Arc<CacheService>) -> Result<Holidays, 
 
     // Load from file while cache is retrieving
     info!("Loading holidays from file");
-    // If not in cache, try loading from file
-    match fs::read_to_string(HD_PATH) {
-        Ok(contents) => {
-            let holidays: Holidays = serde_json::from_str(&contents)?;
 
-            // Trigger async update in background
-            // once a month (when cache expires)
-            let cache_service_clone = Arc::clone(&cache_service);
-
-            info!("Setting holidays cache from file");
-            // Update cache
-            cache_service
-                .client
-                .set(HD_CACHE_KEY, &contents[..], HD_CACHE_EXPIRY)?;
-
-            // Trigger async update in background
-            info!("Throwing background holidays update");
-            tokio::spawn(async move {
-                if let Err(e) = update_holidays(&cache_service_clone).await {
-                    error!("Background update failed: {}", e);
-                }
-            });
-
-            Ok(holidays)
-        }
-        Err(e) => {
-            error!("Error reading file: {}", e);
-            // If file read fails, do an immediate update in a blocking manner:
-            let holidays = tokio::task::spawn_blocking(move || {
-                // Create a dedicated runtime on the blocking thread
-                let rt = tokio::runtime::Runtime::new().map_err(|e| Box::new(e) as FutureError)?;
-                rt.block_on(update_holidays(&Arc::clone(&cache_service)))
-            })
-            .await??;
-            Ok(holidays)
-        }
-    }
-}
-
-/// Update cache and file with API response
-///
-/// # Params
-/// * cache_service: Global cache state with connection to cache provider
-///
-/// # Returns
-/// * Result enum with Holidays or an error
-async fn update_holidays(
-    cache_service: &Arc<CacheService>,
-) -> Result<Holidays, Box<dyn Error + Send + Sync>> {
-    let holidays_api: String = env::var("HOLIDAYS_API")?;
-
-    let current_year = Local::now().year();
+    let current_year = chrono::Local::now().year();
     let years: Vec<i32> = (2024..=current_year).collect();
-    let client = reqwest::Client::new();
-    let mut holidays = Holidays {
-        status: Some("Error".to_string()),
-        data: vec![],
-    };
+
+    let mut holidays: Holidays = Holidays::default();
 
     for year in &years {
-        let url = holidays_api.replace("{year}", &year.to_string());
-        let response = client
-            .get(&url)
-            .timeout(std::time::Duration::from_secs(10))
-            .send()
-            .await?;
+        let path = HD_PATH.replace("{year}", &year.to_string());
 
-        holidays = serde_json::from_str::<Holidays>(&response.text().await?)?;
+        // If not in cache, try loading from file
+        match fs::read_to_string(path) {
+            Ok(contents) => {
+                let mut new_holidays: Holidays = serde_json::from_str(&contents)?;
+                // Append each year to the data
+                holidays.data.append(&mut new_holidays.data);
+
+                info!("Setting holidays cache from file");
+                // Update cache
+                cache_service
+                    .client
+                    .set(HD_CACHE_KEY, &contents[..], HD_CACHE_EXPIRY)?;
+            }
+            Err(e) => {
+                error!("Error reading file: {}", e);
+                // TODO: Execute an alert here
+                Err(e)?
+            }
+        }
     }
-
-    debug!("Writing data of holidays to file {:?}", holidays);
-    fs::write(HD_PATH, serde_json::to_string_pretty(&holidays)?)?;
-
-    let json_bytes = serde_json::to_vec(&holidays)?;
-
-    info!("Setting holidays cache from api");
-    // Update cache
-    cache_service
-        .client
-        .set(HD_CACHE_KEY, &json_bytes[..], HD_CACHE_EXPIRY)?;
-
     Ok(holidays)
 }
 
@@ -939,25 +882,6 @@ mod tests {
     }
 
     // Holidays
-
-    // Update holidays from API
-    #[tokio::test]
-    async fn test_update_holidays() {
-        setup_test_env();
-        let cache_service = setup_cache().await;
-
-        // Update holidays from API
-        let result = update_holidays(&Arc::clone(&cache_service)).await;
-
-        // Assert we get an Ok result containing Holidays
-        // and time in localtime (America/Santiago)
-        match result {
-            Ok(holidays) => {
-                assert!(!holidays.data.len() > 0, "Holidays should not be empty");
-            }
-            Err(e) => panic!("Expected Ok with holidays, got error: {:?}", e),
-        }
-    }
 
     // Get holidays from cache, file or API
     #[tokio::test]
