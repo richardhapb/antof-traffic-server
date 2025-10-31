@@ -7,7 +7,7 @@ use ndarray::{Array1, Array2};
 
 use chrono::{DateTime, Datelike, Local, TimeZone, Timelike, Utc};
 use chrono_tz::America::Santiago;
-use tracing::{error, info, debug};
+use tracing::{debug, error, info};
 
 use crate::cache::CacheService;
 use crate::errors::EventError;
@@ -567,7 +567,7 @@ impl AlertsGrouper {
         let xmin = -70.43700;
         let xmax = -70.36200;
         let ymin = -23.724300;
-        let ymax = -23.485800;
+        let ymax = -23.485400;
 
         let bounds_x = Array1::linspace(xmin, xmax, xdiv);
         let bounds_y = Array1::linspace(ymin, ymax, ydiv);
@@ -642,6 +642,12 @@ pub async fn get_holidays(cache_service: Arc<CacheService>) -> Result<Holidays, 
             // once a month (when cache expires)
             let cache_service_clone = Arc::clone(&cache_service);
 
+            info!("Setting holidays cache from file");
+            // Update cache
+            cache_service
+                .client
+                .set(HD_CACHE_KEY, &contents[..], HD_CACHE_EXPIRY)?;
+
             // Trigger async update in background
             info!("Throwing background holidays update");
             tokio::spawn(async move {
@@ -702,6 +708,7 @@ async fn update_holidays(
 
     let json_bytes = serde_json::to_vec(&holidays)?;
 
+    info!("Setting holidays cache from api");
     // Update cache
     cache_service
         .client
